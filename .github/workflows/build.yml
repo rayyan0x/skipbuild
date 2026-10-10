@@ -43,18 +43,24 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev zlib1g-dev
+          sudo apt-get install -y libssl-dev zlib1g-dev libzstd-dev
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install openssl zstd
 
+      - name: Setup vcpkg (Windows)
+        if: runner.os == 'Windows'
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgArguments: 'zstd:x64-windows'
+
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          # Windows dependencies are handled by vcpkg or system packages
-          # No additional installs needed for MSVC build
+          # Windows dependencies handled by vcpkg above
+          echo "vcpkg installed zstd"
 
       - name: Configure CMake
         run: |

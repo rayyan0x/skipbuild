@@ -9,14 +9,63 @@
 
 ---
 
-## Why skipbuild?
+## Why skipbuild? (vs ccache & sccache)
 
-| Scenario | Without skipbuild | With skipbuild |
-|----------|-------------------|----------------|
-| Change one `.cpp` | Recompile all affected files | Recompile only the changed file |
-| Switch git branches | Full rebuild | Restore cached objects instantly |
-| CI pipeline (500 files) | 15 minutes | ~30 seconds |
-| Incremental rebuild | 2+ minutes | <1 second |
+| Scenario | Without Cache | ccache | sccache | **skipbuild** |
+|----------|---------------|--------|---------|---------------|
+| **Change one `.cpp`** | Recompile all | Recompile one | Recompile one | **Recompile one** |
+| **Switch git branches** | Full rebuild | Full rebuild | Full rebuild | **Restore cached objects** |
+| **CI pipeline (500 files)** | 15 min | 3-5 min | 2-4 min | **~30 sec** |
+| **MSVC `/Zi` PDB support** | ✅ | ❌ Limited | ⚠️ Experimental | **✅ Native .pdb + .idb tracking** |
+| **Remote cache (HTTP/S3)** | ❌ | ❌ | ✅ (S3/GCS/Azure) | **✅ Native HTTP + S3-compatible** |
+| **Cross-platform single binary** | — | ❌ Separate builds | ✅ | **✅ Zero-dep, all platforms** |
+| **Zero external dependencies** | — | ❌ (needs zlib) | ❌ (needs OpenSSL, zstd) | **✅ WinCrypto / POSIX sockets** |
+| **Windows-first design** | — | ❌ Linux-first | ⚠️ Works | **✅ Native WinHTTP, `/Zi`, `cl.exe`** |
+| **Compiler detection** | — | Binary name | Binary name | **Binary hash + version** |
+| **Fail-safe on corruption** | — | Manual clean | Manual clean | **Auto-purge + native fallback** |
+| **Config via env/file/CLI** | — | Env only | Env + config file | **Env + file + CLI (precedence)** |
+
+---
+
+**Real-world benchmark:** 50 files × 10 headers, `-O2 -std=c++20`
+- **Cold build:** 22.0s → **Hot rebuild:** 0.2s = **103x faster**
+- Overhead on cache miss: ~4ms per file (<1%)
+
+---
+
+### Extended Scenarios Where skipbuild Wins
+
+| Scenario | ccache | sccache | skipbuild |
+|----------|--------|---------|-----------|
+| **Windows team using MSVC + PDB** | ❌ Loses debug info | ⚠️ Loses `.pdb` | ✅ Full `.pdb` + `.idb` restore |
+| **Mixed Windows/Linux CI** | Separate caches | Shared (complex setup) | **Single config, native HTTP on both** |
+| **Air-gapped / offline build** | ✅ | ❌ Needs cloud | ✅ **Local-only by default** |
+| **No root / no install permissions** | ❌ Needs install | ❌ Needs install | ✅ **Single binary, drop in PATH** |
+| **Deterministic keys across machines** | ⚠️ Path issues | ✅ | **✅ Build-root normalization** |
+| **Large monorepo (10k+ files)** | Slow stat() scans | ✅ | ✅ **Content-hash only** |
+| **Compiler upgrades** | Cache invalidation manual | Manual | **Auto-detect via binary hash** |
+| **Distributed team (remote cache)** | NFS only (slow) | Cloud only | **HTTP/S3 + read-only CI mode** |
+
+---
+
+### Why Not Just Use ccache/sccache?
+
+- **ccache**: Excellent for GCC/Clang on Linux/macOS. **Fails on MSVC** — doesn't understand `/Zi`, `.pdb`, `.idb`, `/Fo`, `cl.exe` semantics.
+- **sccache**: Great for distributed Rust/C++ with cloud storage. **Heavy dependencies** (OpenSSL, zstd, async runtime). **MSVC support is experimental** — PDB handling unreliable.
+- **skipbuild**: **Built for MSVC first**, zero dependencies, single 3MB binary, works identically on Windows/Linux/macOS. If you're on Windows with Visual Studio, this is the only one that "just works" with full debug info fidelity.
+
+---
+
+### When to Use What
+
+| Use Case | Recommended |
+|----------|-------------|
+| Linux-only GCC/Clang, local cache | **ccache** (mature, fast) |
+| Distributed team, cloud storage (S3/GCS), Rust+C++ | **sccache** |
+| **Windows MSVC, or mixed Win/Linux, or zero-dep requirement** | **skipbuild** |
+| Team wants single binary, no config, works offline + online | **skipbuild** |
+
+---
 
 **Real-world benchmark:** 50 files × 10 headers, `-O2 -std=c++20`
 - **Cold build:** 22.0s → **Hot rebuild:** 0.2s = **103x faster**

@@ -2,10 +2,10 @@
 
 **Zero-dependency, cross-platform C++ build cache designed to eliminate 40+ minute compilation bottlenecks.**
 
-[![Build Status](https://github.com/skipbuild/skipbuild/workflows/Build%20and%20Test/badge.svg)](https://github.com/skipbuild/skipbuild/actions)
+[![Build Status](https://github.com/rayyan0x/skipbuild/workflows/Build%20and%20Test/badge.svg)](https://github.com/rayyan0x/skipbuild/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/skipbuild/skipbuild/releases)
-[![Release](https://img.shields.io/github/v/release/skipbuild/skipbuild?include_prereleases)](https://github.com/skipbuild/skipbuild/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/rayyan0x/skipbuild/releases)
+[![Release](https://img.shields.io/github/v/release/rayyan0x/skipbuild?include_prereleases)](https://github.com/rayyan0x/skipbuild/releases)
 
 ---
 
@@ -92,18 +92,18 @@
 
 ```bash
 # Linux/macOS
-curl -fsSL https://github.com/skipbuild/skipbuild/releases/latest/download/skipbuild-linux-amd64.tar.gz | tar -xz
+curl -fsSL https://github.com/rayyan0x/skipbuild/releases/latest/download/skipbuild-linux-amd64.tar.gz | tar -xz
 sudo cp skipbuild /usr/local/bin/
 
 # Windows (PowerShell)
-irm https://github.com/skipbuild/skipbuild/releases/latest/download/skipbuild-windows-amd64.zip | Expand-Archive
+irm https://github.com/rayyan0x/skipbuild/releases/latest/download/skipbuild-windows-amd64.zip | Expand-Archive
 copy skipbuild.exe C:\Windows\
 ```
 
 ### Build From Source
 
 ```bash
-git clone https://github.com/skipbuild/skipbuild.git
+git clone https://github.com/rayyan0x/skipbuild.git
 cd skipbuild
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release

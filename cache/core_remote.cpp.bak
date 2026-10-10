@@ -1,0 +1,500 @@
+#include "core.hpp"
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <ctime>
+#include <algorithm>
+#include <cstdlib>
+#include <array>
+#include <filesystem>
+#include <atomic>
+#include <unordered_set>
+#include <map>
+#include <thread>
+#include <chrono>
+#include <mutex>
+#include <memory>
+#include <openssl/sha.h>
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
+
+#if REMAKE_HAVE_CURL
+#include <curl/curl.h>
+#endif
+
+namespace fs = std::filesystem;
+namespace remake {
+
+#if REMAKE_HAVE_CURL
+// --- Remote Cache Support ---
+
+// Curl write callback for HTTP responses
+static size_t curl_write_callback(void* contents, size_t size, size_t nmemb, std::string* response) {
+    size_t total = size * nmemb;
+    response->append(static_cast<char*>(contents), total);
+    return total;
+}
+
+// Curl header callback for HTTP headers
+static size_t curl_header_callback(void* contents, size_t size, size_t nmemb, std::string* headers) {
+    size_t total = size * nmemb;
+    headers->append(static_cast<char*>(contents), total);
+    return total;
+}
+
+// Initialize curl with common settings
+static CURL* curl_init(const RemoteCacheConfig& config) {
+    CURL* curl = curl_easy_init();
+    if (!curl) return nullptr;
+    
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, config.timeout_seconds);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, config.verify_ssl ? 1L : 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, config.verify_ssl ? 2L : 0L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "remake/0.1.0");
+    
+    return curl;
+}
+
+// --- AWS SigV4 Signer Implementation ---
+
+// HMAC-SHA256
+static std::string hmac_sha256(const std::string& key, const std::string& data) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    HMAC(EVP_sha256(), key.data(), key.size(), 
+         reinterpret_cast<const unsigned char*>(data.data()), data.size(), 
+         hash, nullptr);
+    std::ostringstream oss;
+    for (auto b : hash) oss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+    return oss.str();
+}
+
+// SHA256 hex
+static std::string sha256_hex(const std::string& data) {
+    SHA256_CTX ctx;
+    SHA256_Init(&ctx);
+    SHA256_Update(&ctx, data.data(), data.size());
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256_Final(hash, &ctx);
+    std::ostringstream oss;
+    for (auto b : hash) oss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+    return oss.str();
+}
+
+// URL encode
+static std::string url_encode(const std::string& s, bool path = false) {
+    std::ostringstream oss;
+    for (char c : s) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~' || (path && c == '/')) {
+            oss << c;
+        } else {
+            oss << '%' << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << (int)(unsigned char)c;
+        }
+    }
+    return oss.str();
+}
+
+// Get current time in ISO8601 format (YYYYMMDDTHHMMSSZ)
+static std::string get_iso8601_time() {
+    auto now = std::chrono::system_clock::now();
+    auto tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::gmtime(&tt);
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y%m%dT%H%M%SZ");
+    return oss.str();
+}
+
+// Get date stamp (YYYYMMDD)
+static std::string get_date_stamp() {
+    auto now = std::chrono::system_clock::now();
+    auto tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::gmtime(&tt);
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y%m%d");
+    return oss.str();
+}
+
+// Build remote URL for a cache key
+static std::string build_remote_url(const RemoteCacheConfig& config, const CacheKey& key) {
+    std::string url = config.endpoint;
+    if (!url.empty() && url.back() != '/') url += '/';
+    
+    // Object key with toolchain prefix
+    std::string object_key = key.toolchain_id.substr(0, 8) + '/' + key.hash.substr(0, 2) + '/' + key.hash.substr(2, 2) + '/' + key.hash;
+    
+    // For S3-compatible, use virtual-hosted style if bucket is specified
+    if (config.type == RemoteCacheType::S3 && !config.bucket.empty()) {
+        // Remove trailing slash from endpoint if present
+        std::string endpoint = config.endpoint;
+        if (!endpoint.empty() && endpoint.back() == '/') endpoint.pop_back();
+        
+        // Check if endpoint already contains bucket (path-style)
+        if (endpoint.find(config.bucket) == std::string::npos) {
+            // Virtual-hosted style: https://bucket.endpoint/key
+            size_t scheme_end = endpoint.find("://");
+            if (scheme_end != std::string::npos) {
+                std::string scheme = endpoint.substr(0, scheme_end + 3);
+                std::string host = endpoint.substr(scheme_end + 3);
+                url = scheme + config.bucket + "." + host + "/";
+            } else {
+                url = endpoint + "/" + config.bucket + "/";
+            }
+        }
+    }
+    
+    url += object_key;
+    return url;
+}
+
+// Perform HTTP request with retry logic
+static bool curl_request(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url, 
+                         const std::string& method, const std::string* body,
+                         std::string* response, long* http_code,
+                         const std::map<std::string, std::string>* headers = nullptr) {
+    CURL* curl = curl_init(config);
+    if (!curl) return false;
+    
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+    
+    std::string response_str;
+    std::string header_str;
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_str);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_callback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &header_str);
+    
+    if (body && !body->empty()) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body->c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body->size());
+    }
+    
+    // Prepare headers
+    std::map<std::string, std::string> request_headers;
+    request_headers["Content-Type"] = "application/octet-stream";
+    if (!config.auth_header.empty()) {
+        // Parse custom auth header (format: "Header-Name: value")
+        size_t colon = config.auth_header.find(':');
+        if (colon != std::string::npos) {
+            std::string name = config.auth_header.substr(0, colon);
+            std::string value = config.auth_header.substr(colon + 1);
+            // Trim whitespace
+            while (!value.empty() && std::isspace(value[0])) value.erase(0, 1);
+            request_headers[name] = value;
+        }
+    }
+    if (headers) {
+        for (const auto& h : *headers) {
+            request_headers[h.first] = h.second;
+        }
+    }
+    
+    // Sign request if using S3 with SigV4
+    std::string payload_hash = "UNSIGNED-PAYLOAD";
+    if (signer && body && !body->empty()) {
+        payload_hash = signer->sha256_hex(*body);
+    } else if (signer) {
+        payload_hash = signer->sha256_hex("");
+    }
+    
+    std::map<std::string, std::string> final_headers;
+    if (signer) {
+        final_headers = signer->sign_request(method, url, request_headers, payload_hash);
+    } else {
+        final_headers = request_headers;
+    }
+    
+    // Set headers
+    struct curl_slist* header_list = nullptr;
+    for (const auto& h : final_headers) {
+        header_list = curl_slist_append(header_list, (h.first + ": " + h.second).c_str());
+    }
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    
+    if (response) curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
+    if (response) curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    
+    // Retry logic
+    bool success = false;
+    for (int attempt = 0; attempt <= config.max_retries; ++attempt) {
+        CURLcode res = curl_easy_perform(curl);
+        if (res == CURLE_OK) {
+            success = true;
+            break;
+        }
+        if (attempt < config.max_retries) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+        }
+    }
+    
+    if (http_code) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, http_code);
+    if (response) *response = response_str;
+    
+    curl_slist_free_all(header_list);
+    curl_easy_cleanup(curl);
+    
+    return success;
+}
+
+// Upload file via HTTP PUT
+static bool upload_file(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url, const std::filesystem::path& file) {
+    std::ifstream f(file, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    
+    std::streamsize size = f.tellg();
+    f.seekg(0, std::ios::beg);
+    
+    std::vector<char> buffer(size);
+    if (!f.read(buffer.data(), size)) return false;
+    
+    std::string body(buffer.data(), size);
+    std::string response;
+    long http_code;
+    
+    std::map<std::string, std::string> headers;
+    headers["Content-Length"] = std::to_string(size);
+    
+    bool ok = curl_request(config, signer, url, "PUT", &body, &response, &http_code, &headers);
+    return ok && (http_code >= 200 && http_code < 300);
+}
+
+// Download file via HTTP GET
+static bool download_file(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url, const std::filesystem::path& file) {
+    std::string response;
+    long http_code;
+    
+    bool ok = curl_request(config, signer, url, "GET", nullptr, &response, &http_code);
+    if (!ok || http_code < 200 || http_code >= 300) return false;
+    
+    std::filesystem::create_directories(file.parent_path());
+    std::ofstream f(file, std::ios::binary);
+    if (!f) return false;
+    f.write(response.data(), response.size());
+    return true;
+}
+
+// Check if file exists via HTTP HEAD
+static bool file_exists(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url) {
+    std::string response;
+    long http_code;
+    
+    bool ok = curl_request(config, signer, url, "HEAD", nullptr, &response, &http_code);
+    return ok && (http_code >= 200 && http_code < 300);
+}
+
+// Delete file via HTTP DELETE
+static bool delete_file(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url) {
+    std::string response;
+    long http_code;
+    
+    bool ok = curl_request(config, signer, url, "DELETE", nullptr, &response, &http_code);
+    return ok && (http_code >= 200 && http_code < 300);
+}
+
+// Static function for curl global init
+static void curl_global_init_once() {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+}
+
+RemoteCache::RemoteCache(RemoteCacheConfig config, std::filesystem::path local_cache)
+    : config_(std::move(config)), local_cache_(std::move(local_cache)) {
+    // Initialize curl globally
+    static std::once_flag curl_init_flag;
+    std::call_once(curl_init_flag, curl_global_init_once);
+    
+    // Create SigV4 signer for S3-compatible storage
+    if (config_.type == RemoteCacheType::S3 && !config_.access_key.empty() && !config_.secret_key.empty() && !config_.region.empty()) {
+        signer_ = std::make_unique<SigV4Signer>(config_.access_key, config_.secret_key, config_.region, "s3");
+    }
+}
+
+std::optional<CacheEntry> RemoteCache::get(const CacheKey& key) const {
+    const SigV4Signer* signer = signer_.get();
+    
+    // Try remote first
+    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
+        std::string url = build_remote_url(config_, key);
+        
+        // Try to download metadata first
+        std::string meta_url = url + "/meta.json";
+        std::string response;
+        long http_code;
+        
+        if (curl_request(config_, signer, meta_url, "GET", nullptr, &response, &http_code)) {
+            if (http_code >= 200 && http_code < 300) {
+                // Parse meta.json to get output filenames
+                // For simplicity, assume single output with same name as key
+                std::filesystem::path local_file = local_cache_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash / (key.hash + ".out");
+                
+                if (download_file(config_, signer, url + "/" + key.hash + ".out", local_file)) {
+                    CacheEntry entry;
+                    entry.key = key;
+                    entry.outputs.push_back(local_file);
+                    return entry;
+                }
+            }
+        }
+    } else if (config_.type == RemoteCacheType::LocalFS) {
+        // LocalFS: just check the shared path
+        std::filesystem::path remote_path = config_.endpoint;
+        std::filesystem::path key_path = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+        std::filesystem::path meta_file = key_path / "meta.json";
+        
+        if (std::filesystem::exists(meta_file)) {
+            // Copy to local cache
+            std::filesystem::path local_dir = local_cache_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+            std::filesystem::create_directories(local_dir);
+            
+            CacheEntry entry;
+            entry.key = key;
+            for (auto& f : std::filesystem::directory_iterator(key_path)) {
+                if (f.path().filename() != "meta.json") {
+                    std::filesystem::copy_file(f.path(), local_dir / f.path().filename(), 
+                                              std::filesystem::copy_options::overwrite_existing);
+                    entry.outputs.push_back(local_dir / f.path().filename());
+                }
+            }
+            return entry;
+        }
+    }
+    
+    // Fallback to local cache
+    // (This would be handled by the local Cache class, not here)
+    return std::nullopt;
+}
+
+bool RemoteCache::put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs) {
+    if (outputs.empty()) return false;
+    
+    const SigV4Signer* signer = signer_.get();
+    
+    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
+        std::string base_url = build_remote_url(config_, key);
+        
+        // Upload each output file
+        for (const auto& output : outputs) {
+            std::string file_url = base_url + "/" + output.filename().string();
+            if (!upload_file(config_, signer, file_url, output)) {
+                return false;
+            }
+        }
+        
+        // Upload metadata - write to temp file first
+        std::string meta = "{\"toolchain\":\"" + key.toolchain_id + "\",\"ts\":" + std::to_string(std::time(nullptr)) + "}";
+        std::string meta_url = base_url + "/meta.json";
+        
+        // Create temp file for metadata
+        fs::path meta_temp = fs::temp_directory_path() / ("remake_meta_" + key.hash.substr(0, 16) + ".json");
+        std::ofstream meta_file(meta_temp);
+        meta_file << meta;
+        meta_file.close();
+        
+        bool ok = upload_file(config_, signer, meta_url, meta_temp);
+        std::error_code ec;
+        fs::remove(meta_temp, ec);
+        
+        if (!ok) {
+            // Fallback: try to upload meta as string directly
+            std::string response;
+            long http_code;
+            curl_request(config_, signer, meta_url, "PUT", &meta, &response, &http_code);
+            ok = (http_code >= 200 && http_code < 300);
+        }
+        
+        return ok;
+    } else if (config_.type == RemoteCacheType::LocalFS) {
+        std::filesystem::path remote_path = config_.endpoint;
+        std::filesystem::path key_path = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+        std::filesystem::create_directories(key_path);
+        
+        for (const auto& output : outputs) {
+            std::filesystem::copy_file(output, key_path / output.filename(), 
+                                       std::filesystem::copy_options::overwrite_existing);
+        }
+        
+        std::ofstream meta(key_path / "meta.json");
+        meta << "{\"toolchain\":\"" << key.toolchain_id << "\",\"ts\":" << std::time(nullptr) << "}";
+        
+        return true;
+    }
+    
+    return false;
+}
+
+bool RemoteCache::has(const CacheKey& key) const {
+    const SigV4Signer* signer = signer_.get();
+    
+    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
+        std::string url = build_remote_url(config_, key) + "/meta.json";
+        return file_exists(config_, signer, url);
+    } else if (config_.type == RemoteCacheType::LocalFS) {
+        std::filesystem::path remote_path = config_.endpoint;
+        std::filesystem::path meta_file = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash / "meta.json";
+        return std::filesystem::exists(meta_file);
+    }
+    return false;
+}
+
+bool RemoteCache::remove(const CacheKey& key) {
+    const SigV4Signer* signer = signer_.get();
+    
+    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
+        std::string url = build_remote_url(config_, key) + "/meta.json";
+        return delete_file(config_, signer, url);
+    } else if (config_.type == RemoteCacheType::LocalFS) {
+        std::filesystem::path remote_path = config_.endpoint;
+        std::filesystem::path key_path = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+        std::error_code ec;
+        std::filesystem::remove_all(key_path, ec);
+        return !ec;
+    }
+    return false;
+}
+
+RemoteCache::RemoteStats RemoteCache::get_stats() const {
+    RemoteStats stats;
+    // Stats would be tracked in a real implementation
+    return stats;
+}
+
+// RemoteCache from environment
+RemoteCacheConfig RemoteCache::from_env() {
+    RemoteCacheConfig config;
+    
+    // Type
+    if (const char* env = std::getenv("REMAKE_REMOTE_TYPE")) {
+        std::string type = env;
+        if (type == "http") config.type = RemoteCacheType::HTTP;
+        else if (type == "localfs") config.type = RemoteCacheType::LocalFS;
+        else if (type == "s3") config.type = RemoteCacheType::S3;
+        else if (type == "gcs") config.type = RemoteCacheType::GCS;
+        else if (type == "azure") config.type = RemoteCacheType::Azure;
+    }
+    
+    if (const char* env = std::getenv("REMAKE_REMOTE_ENDPOINT")) config.endpoint = env;
+    if (const char* env = std::getenv("REMAKE_REMOTE_ACCESS_KEY")) config.access_key = env;
+    if (const char* env = std::getenv("REMAKE_REMOTE_SECRET_KEY")) config.secret_key = env;
+    if (const char* env = std::getenv("REMAKE_REMOTE_REGION")) config.region = env;
+    if (const char* env = std::getenv("REMAKE_REMOTE_BUCKET")) config.bucket = env;
+    if (const char* env = std::getenv("REMAKE_REMOTE_TIMEOUT")) config.timeout_seconds = std::stoi(env);
+    if (const char* env = std::getenv("REMAKE_REMOTE_VERIFY_SSL")) config.verify_ssl = (std::string(env) == "1" || std::string(env) == "true");
+    if (const char* env = std::getenv("REMAKE_REMOTE_AUTH_HEADER")) config.auth_header = env;
+    
+    // S3-style auth header construction (for HTTP type with S3-compatible)
+    if (config.type == RemoteCacheType::HTTP && !config.access_key.empty() && !config.secret_key.empty()) {
+        // For S3, we'd normally sign requests with AWS SigV4
+        // For now, use basic auth header if provided
+        if (config.auth_header.empty()) {
+            config.auth_header = "Authorization: Bearer " + config.access_key;
+        }
+    }
+    
+    return config;
+}
+
+#endif // REMAKE_HAVE_CURL
+
+} // namespace remake

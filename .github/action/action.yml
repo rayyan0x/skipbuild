@@ -1,0 +1,69 @@
+name: 'remake Build Cache'
+description: 'Cache C++ object files across builds for faster compilation'
+author: 'remake'
+
+inputs:
+  cache-key:
+    description: 'Cache key prefix (include OS, compiler, etc.)'
+    required: false
+    default: '${{ runner.os }}-${{ hashFiles(''**/CMakeLists.txt'') }}-${{ hashFiles(''**/*.cpp'', ''**/*.hpp'', ''**/*.h'') }}'
+  cache-dir:
+    description: 'Cache directory'
+    required: false
+    default: '~/.cache/remake'
+  compiler:
+    description: 'Compiler to use (g++, clang++, cl.exe)'
+    required: false
+    default: ''
+  args:
+    description: 'Additional arguments passed to remake'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install remake
+      shell: bash
+      run: |
+        if [ "${{ runner.os }}" = "Windows" ]; then
+          # Windows: download prebuilt binary
+          curl -fsSL https://github.com/yourname/remake/releases/latest/download/remake-windows-x86_64.zip -o remake.zip
+          unzip -q remake.zip -d $HOME/.local/bin
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+        else
+          # Linux/macOS: install via script
+          curl -fsSL https://github.com/yourname/remake/releases/latest/download/install.sh | bash -s -- --prefix $HOME/.local
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+        fi
+    
+    - name: Configure cache
+      shell: bash
+      run: |
+        export REMAKE_CACHE_DIR="${{ inputs.cache-dir }}"
+        echo "REMAKE_CACHE_DIR=$REMAKE_CACHE_DIR" >> $GITHUB_ENV
+    
+    - name: Restore cache
+      id: remake-cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.cache-dir }}
+        key: remake-${{ inputs.cache-key }}
+        restore-keys: |
+          remake-${{ runner.os }}-
+    
+    - name: Build with remake
+      shell: bash
+      run: |
+        # If using CMake, remake is automatically used via CMAKE_CXX_COMPILER_LAUNCHER
+        # Otherwise, wrap your compile commands:
+        # remake -- g++ -c foo.cpp -o foo.o
+        echo "remake cache configured at ${{ inputs.cache-dir }}"
+        echo "Cache key: remake-${{ inputs.cache-key }}"
+        
+    - name: Save cache
+      if: always()
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.cache-dir }}
+        key: remake-${{ inputs.cache-key }}

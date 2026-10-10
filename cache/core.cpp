@@ -1,0 +1,2017 @@
+#include "core.hpp"
+#include "crypto.hpp"
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <ctime>
+#include <algorithm>
+#include <cstdlib>
+#include <array>
+#include <filesystem>
+#include <atomic>
+#include <unordered_set>
+#include <map>
+#include <thread>
+#include <chrono>
+#include <mutex>
+#include <memory>
+#include <cstdint>
+
+#if REMAKE_HAVE_CURL
+#include <curl/curl.h>
+#endif
+
+#if REMAKE_HAVE_ZSTD
+#include <zstd.h>
+#endif
+
+namespace fs = std::filesystem;
+namespace remake {
+
+#if REMAKE_HAVE_CURL
+// --- Remote Cache Support ---
+
+// Curl write callback for HTTP responses
+static size_t curl_write_callback(void* contents, size_t size, size_t nmemb, std::string* response) {
+    size_t total = size * nmemb;
+    response->append(static_cast<char*>(contents), total);
+    return total;
+}
+
+// Curl header callback for HTTP headers
+static size_t curl_header_callback(void* contents, size_t size, size_t nmemb, std::string* headers) {
+    size_t total = size * nmemb;
+    headers->append(static_cast<char*>(contents), total);
+    return total;
+}
+
+// Initialize curl with common settings
+static CURL* curl_init(const RemoteCacheConfig& config) {
+    CURL* curl = curl_easy_init();
+    if (!curl) return nullptr;
+    
+    // Use new timeout settings (fail-fast: 3 second connect/read)
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, config.connect_timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, config.read_timeout_ms);
+    // Legacy fallback
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, config.timeout_seconds);
+    
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, config.verify_ssl ? 1L : 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, config.verify_ssl ? 2L : 0L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "remake/0.1.0");
+    
+    // Fail fast on HTTP errors >= 400
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0L); // We'll handle HTTP codes manually
+    
+    return curl;
+}
+
+// --- AWS SigV4 Signer Implementation ---
+
+// HMAC-SHA256
+static std::string hmac_sha256(const std::string& key, const std::string& data) {
+    return remake::crypto::hmac_sha256_hex(key, data);
+}
+
+// SHA256 hex
+static std::string sha256_hex(const std::string& data) {
+    return remake::crypto::sha256_hex(data);
+}
+
+// URL encode
+static std::string url_encode(const std::string& s, bool path = false) {
+    std::ostringstream oss;
+    for (char c : s) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~' || (path && c == '/')) {
+            oss << c;
+        } else {
+            oss << '%' << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << (int)(unsigned char)c;
+        }
+    }
+    return oss.str();
+}
+
+// Get current time in ISO8601 format (YYYYMMDDTHHMMSSZ)
+static std::string get_iso8601_time() {
+    auto now = std::chrono::system_clock::now();
+    auto tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::gmtime(&tt);
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y%m%dT%H%M%SZ");
+    return oss.str();
+}
+
+// Get date stamp (YYYYMMDD)
+static std::string get_date_stamp() {
+    auto now = std::chrono::system_clock::now();
+    auto tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::gmtime(&tt);
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y%m%d");
+    return oss.str();
+}
+
+// Build remote URL for a cache key
+static std::string build_remote_url(const RemoteCacheConfig& config, const CacheKey& key) {
+    std::string url = config.endpoint;
+    if (!url.empty() && url.back() != '/') url += '/';
+    
+    // Object key with toolchain prefix
+    std::string object_key = key.toolchain_id.substr(0, 8) + '/' + key.hash.substr(0, 2) + '/' + key.hash.substr(2, 2) + '/' + key.hash;
+    
+    // For S3-compatible, use virtual-hosted style if bucket is specified
+    if (config.type == RemoteCacheType::S3 && !config.bucket.empty()) {
+        // Remove trailing slash from endpoint if present
+        std::string endpoint = config.endpoint;
+        if (!endpoint.empty() && endpoint.back() == '/') endpoint.pop_back();
+        
+        // Check if endpoint already contains bucket (path-style)
+        if (endpoint.find(config.bucket) == std::string::npos) {
+            // Virtual-hosted style: https://bucket.endpoint/key
+            size_t scheme_end = endpoint.find("://");
+            if (scheme_end != std::string::npos) {
+                std::string scheme = endpoint.substr(0, scheme_end + 3);
+                std::string host = endpoint.substr(scheme_end + 3);
+                url = scheme + config.bucket + "." + host + "/";
+            } else {
+                url = endpoint + "/" + config.bucket + "/";
+            }
+        }
+    }
+    
+    url += object_key;
+    return url;
+}
+
+// Perform HTTP request with retry logic (fail-fast on 503/500)
+static bool curl_request(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url, 
+                         const std::string& method, const std::string* body,
+                         std::string* response, long* http_code,
+                         const std::map<std::string, std::string>* headers = nullptr) {
+    CURL* curl = curl_init(config);
+    if (!curl) return false;
+    
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+    
+    std::string response_str;
+    std::string header_str;
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_str);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_callback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &header_str);
+    
+    if (body && !body->empty()) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body->c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body->size());
+    }
+    
+    // Prepare headers
+    std::map<std::string, std::string> request_headers;
+    request_headers["Content-Type"] = "application/octet-stream";
+    if (!config.auth_header.empty()) {
+        // Parse custom auth header (format: "Header-Name: value")
+        size_t colon = config.auth_header.find(':');
+        if (colon != std::string::npos) {
+            std::string name = config.auth_header.substr(0, colon);
+            std::string value = config.auth_header.substr(colon + 1);
+            // Trim whitespace
+            while (!value.empty() && std::isspace(value[0])) value.erase(0, 1);
+            request_headers[name] = value;
+        }
+    }
+    if (headers) {
+        for (const auto& h : *headers) {
+            request_headers[h.first] = h.second;
+        }
+    }
+    
+    // Sign request if using S3 with SigV4
+    std::string payload_hash = "UNSIGNED-PAYLOAD";
+    if (signer && body && !body->empty()) {
+        payload_hash = signer->sha256_hex(*body);
+    } else if (signer) {
+        payload_hash = signer->sha256_hex("");
+    }
+    
+    std::map<std::string, std::string> final_headers;
+    if (signer) {
+        final_headers = signer->sign_request(method, url, request_headers, payload_hash);
+    } else {
+        final_headers = request_headers;
+    }
+    
+    // Set headers
+    struct curl_slist* header_list = nullptr;
+    for (const auto& h : final_headers) {
+        header_list = curl_slist_append(header_list, (h.first + ": " + h.second).c_str());
+    }
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    
+    if (response) curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
+    if (response) curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    
+    // Retry logic with fail-fast on server errors
+    bool success = false;
+    long response_code = 0;
+    for (int attempt = 0; attempt <= config.max_retries; ++attempt) {
+        CURLcode res = curl_easy_perform(curl);
+        if (res == CURLE_OK) {
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+            
+            // Fail fast on server errors (500, 502, 503, 504) - don't retry
+            if (response_code == 500 || response_code == 502 || response_code == 503 || response_code == 504) {
+                if (response) *response = response_str;
+                if (http_code) *http_code = response_code;
+                curl_slist_free_all(header_list);
+                curl_easy_cleanup(curl);
+                return false; // Immediate fallback to local
+            }
+            
+            // Success (2xx) or client error (4xx) - don't retry client errors
+            if (response_code >= 200 && response_code < 300) {
+                success = true;
+                break;
+            }
+            
+            // For other codes, we could retry but let's fail fast
+            break;
+        }
+        
+        // CURL error (timeout, connection failed, etc.) - fail fast
+        if (attempt < config.max_retries) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+        }
+    }
+    
+    if (http_code) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, http_code);
+    if (response) *response = response_str;
+    
+    curl_slist_free_all(header_list);
+    curl_easy_cleanup(curl);
+    
+    return success;
+}
+
+// Upload file via HTTP PUT
+static bool upload_file(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url, const std::filesystem::path& file) {
+    std::ifstream f(file, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    
+    std::streamsize size = f.tellg();
+    f.seekg(0, std::ios::beg);
+    
+    std::vector<char> buffer(size);
+    if (!f.read(buffer.data(), size)) return false;
+    
+    std::string body(buffer.data(), size);
+    std::string response;
+    long http_code;
+    
+    std::map<std::string, std::string> headers;
+    headers["Content-Length"] = std::to_string(size);
+    
+    bool ok = curl_request(config, signer, url, "PUT", &body, &response, &http_code, &headers);
+    return ok && (http_code >= 200 && http_code < 300);
+}
+
+// Download file via HTTP GET
+static bool download_file(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url, const std::filesystem::path& file) {
+    std::string response;
+    long http_code;
+    
+    bool ok = curl_request(config, signer, url, "GET", nullptr, &response, &http_code);
+    if (!ok || http_code < 200 || http_code >= 300) return false;
+    
+    std::filesystem::create_directories(file.parent_path());
+    std::ofstream f(file, std::ios::binary);
+    if (!f) return false;
+    f.write(response.data(), response.size());
+    return true;
+}
+
+// Check if file exists via HTTP HEAD
+static bool file_exists(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url) {
+    std::string response;
+    long http_code;
+    
+    bool ok = curl_request(config, signer, url, "HEAD", nullptr, &response, &http_code);
+    return ok && (http_code >= 200 && http_code < 300);
+}
+
+// Delete file via HTTP DELETE
+static bool delete_file(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url) {
+    std::string response;
+    long http_code;
+    
+    bool ok = curl_request(config, signer, url, "DELETE", nullptr, &response, &http_code);
+    return ok && (http_code >= 200 && http_code < 300);
+}
+
+// Static function for curl global init
+static void curl_global_init_once() {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+}
+
+RemoteCache::RemoteCache(RemoteCacheConfig config, std::filesystem::path local_cache)
+    : config_(std::move(config)), local_cache_(std::move(local_cache)) {
+    // Initialize curl globally
+    static std::once_flag curl_init_flag;
+    std::call_once(curl_init_flag, curl_global_init_once);
+    
+    // Create SigV4 signer for S3-compatible storage
+    if (config_.type == RemoteCacheType::S3 && !config_.access_key.empty() && !config_.secret_key.empty() && !config_.region.empty()) {
+        signer_ = std::make_unique<SigV4Signer>(config_.access_key, config_.secret_key, config_.region, "s3");
+    }
+}
+
+std::optional<CacheEntry> RemoteCache::get(const CacheKey& key) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const SigV4Signer* signer = signer_.get();
+    
+    // Try remote first
+    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
+        std::string url = build_remote_url(config_, key);
+        
+        // Try to download metadata first
+        std::string meta_url = url + "/meta.json";
+        std::string response;
+        long http_code;
+        
+        if (curl_request(config_, signer, meta_url, "GET", nullptr, &response, &http_code)) {
+            if (http_code >= 200 && http_code < 300) {
+                // Parse meta.json to get output filenames
+                // For simplicity, assume single output with same name as key
+                std::filesystem::path local_file = local_cache_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash / (key.hash + ".out");
+                
+                if (download_file(config_, signer, url + "/" + key.hash + ".out", local_file)) {
+                    CacheEntry entry;
+                    entry.key = key;
+                    entry.outputs.push_back(local_file);
+                    return entry;
+                }
+            }
+        }
+    } else if (config_.type == RemoteCacheType::LocalFS) {
+        // LocalFS: just check the shared path
+        std::filesystem::path remote_path = config_.endpoint;
+        std::filesystem::path key_path = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+        std::filesystem::path meta_file = key_path / "meta.json";
+        
+        if (std::filesystem::exists(meta_file)) {
+            // Copy to local cache
+            std::filesystem::path local_dir = local_cache_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+            std::filesystem::create_directories(local_dir);
+            
+            CacheEntry entry;
+            entry.key = key;
+            for (auto& f : std::filesystem::directory_iterator(key_path)) {
+                if (f.path().filename() != "meta.json") {
+                    std::filesystem::copy_file(f.path(), local_dir / f.path().filename(), 
+                                              std::filesystem::copy_options::overwrite_existing);
+                    entry.outputs.push_back(local_dir / f.path().filename());
+                }
+            }
+            return entry;
+        }
+    }
+    
+    // Fallback to local cache
+    // (This would be handled by the local Cache class, not here)
+    return std::nullopt;
+}
+
+bool RemoteCache::put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (outputs.empty()) return false;
+    
+    const SigV4Signer* signer = signer_.get();
+    
+    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
+        std::string base_url = build_remote_url(config_, key);
+        
+        // Upload each output file
+        for (const auto& output : outputs) {
+            std::string file_url = base_url + "/" + output.filename().string();
+            if (!upload_file(config_, signer, file_url, output)) {
+                return false;
+            }
+        }
+        
+        // Upload metadata - write to temp file first
+        std::string meta = "{\"toolchain\":\"" + key.toolchain_id + "\",\"ts\":" + std::to_string(std::time(nullptr)) + "}";
+        std::string meta_url = base_url + "/meta.json";
+        
+        // Create temp file for metadata
+        fs::path meta_temp = fs::temp_directory_path() / ("remake_meta_" + key.hash.substr(0, 16) + ".json");
+        std::ofstream meta_file(meta_temp);
+        meta_file << meta;
+        meta_file.close();
+        
+        bool ok = upload_file(config_, signer, meta_url, meta_temp);
+        std::error_code ec;
+        fs::remove(meta_temp, ec);
+        
+        if (!ok) {
+            // Fallback: try to upload meta as string directly
+            std::string response;
+            long http_code;
+            curl_request(config_, signer, meta_url, "PUT", &meta, &response, &http_code);
+            ok = (http_code >= 200 && http_code < 300);
+        }
+        
+        return ok;
+    } else if (config_.type == RemoteCacheType::LocalFS) {
+        std::filesystem::path remote_path = config_.endpoint;
+        std::filesystem::path key_path = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+        std::filesystem::create_directories(key_path);
+        
+        for (const auto& output : outputs) {
+            std::filesystem::copy_file(output, key_path / output.filename(), 
+                                       std::filesystem::copy_options::overwrite_existing);
+        }
+        
+        std::ofstream meta(key_path / "meta.json");
+        meta << "{\"toolchain\":\"" << key.toolchain_id << "\",\"ts\":" << std::time(nullptr) << "}";
+        
+        return true;
+    }
+    
+    return false;
+}
+
+bool RemoteCache::has(const CacheKey& key) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const SigV4Signer* signer = signer_.get();
+    
+    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
+        std::string url = build_remote_url(config_, key) + "/meta.json";
+        return file_exists(config_, signer, url);
+    } else if (config_.type == RemoteCacheType::LocalFS) {
+        std::filesystem::path remote_path = config_.endpoint;
+        std::filesystem::path meta_file = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash / "meta.json";
+        return std::filesystem::exists(meta_file);
+    }
+    return false;
+}
+
+bool RemoteCache::remove(const CacheKey& key) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const SigV4Signer* signer = signer_.get();
+    
+    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
+        std::string url = build_remote_url(config_, key) + "/meta.json";
+        return delete_file(config_, signer, url);
+    } else if (config_.type == RemoteCacheType::LocalFS) {
+        std::filesystem::path remote_path = config_.endpoint;
+        std::filesystem::path key_path = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+        std::error_code ec;
+        std::filesystem::remove_all(key_path, ec);
+        return !ec;
+    }
+    return false;
+}
+
+RemoteCache::RemoteStats RemoteCache::get_stats() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    RemoteStats stats;
+    // Stats would be tracked in a real implementation
+    return stats;
+}
+
+// RemoteCache from environment
+RemoteCacheConfig RemoteCache::from_env() {
+    RemoteCacheConfig config;
+    
+    // Type
+    if (const char* env = std::getenv("REMAKE_REMOTE_TYPE")) {
+        std::string type = env;
+        if (type == "http") config.type = RemoteCacheType::HTTP;
+        else if (type == "localfs") config.type = RemoteCacheType::LocalFS;
+        else if (type == "s3") config.type = RemoteCacheType::S3;
+        else if (type == "gcs") config.type = RemoteCacheType::GCS;
+        else if (type == "azure") config.type = RemoteCacheType::Azure;
+    }
+    
+    if (const char* env = std::getenv("REMAKE_REMOTE_ENDPOINT")) config.endpoint = env;
+    if (const char* env = std::getenv("REMAKE_REMOTE_ACCESS_KEY")) config.access_key = env;
+    if (const char* env = std::getenv("REMAKE_REMOTE_SECRET_KEY")) config.secret_key = env;
+    if (const char* env = std::getenv("REMAKE_REMOTE_REGION")) config.region = env;
+    if (const char* env = std::getenv("REMAKE_REMOTE_BUCKET")) config.bucket = env;
+    if (const char* env = std::getenv("REMAKE_REMOTE_TIMEOUT")) config.timeout_seconds = std::stoi(env);
+    if (const char* env = std::getenv("REMAKE_REMOTE_CONNECT_TIMEOUT_MS")) config.connect_timeout_ms = std::stoi(env);
+    if (const char* env = std::getenv("REMAKE_REMOTE_READ_TIMEOUT_MS")) config.read_timeout_ms = std::stoi(env);
+    if (const char* env = std::getenv("REMAKE_REMOTE_MAX_RETRIES")) config.max_retries = std::stoi(env);
+    if (const char* env = std::getenv("REMAKE_REMOTE_VERIFY_SSL")) config.verify_ssl = (std::string(env) == "1" || std::string(env) == "true");
+    if (const char* env = std::getenv("REMAKE_REMOTE_AUTH_HEADER")) config.auth_header = env;
+    
+    // S3-style auth header construction (for HTTP type with S3-compatible)
+    if (config.type == RemoteCacheType::HTTP && !config.access_key.empty() && !config.secret_key.empty()) {
+        // For S3, we'd normally sign requests with AWS SigV4
+        // For now, use basic auth header if provided
+        if (config.auth_header.empty()) {
+            config.auth_header = "Authorization: Bearer " + config.access_key;
+        }
+    }
+    
+    return config;
+}
+
+#endif // REMAKE_HAVE_CURL
+
+// --- File Lock Implementation ---
+
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
+
+struct FileLock::Impl {
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+    std::filesystem::path lock_path_;
+    bool locked_ = false;
+    FileLock::LockType lock_type_ = FileLock::LockType::Exclusive;
+    
+    explicit Impl(const std::filesystem::path& path) : lock_path_(path) {}
+    
+    ~Impl() {
+        if (locked_) unlock();
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+        }
+    }
+    
+    bool lock(FileLock::LockType type, int timeout_ms) {
+        if (locked_) return true;
+        lock_type_ = type;
+        
+        // Windows LockFileEx supports true shared locks:
+        // - Shared (read): dwFlags = 0
+        // - Exclusive (write): dwFlags = LOCKFILE_EXCLUSIVE_LOCK
+        DWORD lock_flags = (type == FileLock::LockType::Shared) ? 0 : LOCKFILE_EXCLUSIVE_LOCK;
+        DWORD share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;  // Allow concurrent opens
+        
+        auto start = std::chrono::steady_clock::now();
+        int attempt = 0;
+        
+        while (true) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed >= timeout_ms) return false;
+            
+            std::error_code ec;
+            std::filesystem::create_directories(lock_path_.parent_path(), ec);
+            
+            std::wstring wpath = lock_path_.wstring();
+            handle_ = CreateFileW(
+                wpath.c_str(),
+                GENERIC_READ | GENERIC_WRITE,
+                share_mode,
+                nullptr,
+                OPEN_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,  // Removed FILE_FLAG_DELETE_ON_CLOSE
+                nullptr
+            );
+            
+            if (handle_ == INVALID_HANDLE_VALUE) {
+                DWORD error = GetLastError();
+                if (error == ERROR_PATH_NOT_FOUND || error == ERROR_FILE_NOT_FOUND) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10 * (attempt + 1)));
+                    attempt++;
+                    continue;
+                }
+                return false;
+            }
+            
+            OVERLAPPED overlapped = {0};
+            DWORD flags = lock_flags | LOCKFILE_FAIL_IMMEDIATELY;
+            
+            // Lock 1 byte at offset 0
+            if (!LockFileEx(handle_, flags, 0, 1, 0, &overlapped)) {
+                DWORD error = GetLastError();
+                CloseHandle(handle_);
+                handle_ = INVALID_HANDLE_VALUE;
+                
+                if (error == ERROR_LOCK_VIOLATION || error == ERROR_SHARING_VIOLATION || 
+                    error == ERROR_IO_PENDING || error == ERROR_ACCESS_DENIED) {
+                    int sleep_ms = (50 < 10 * (attempt + 1)) ? 50 : 10 * (attempt + 1);
+                    if (elapsed + sleep_ms > timeout_ms) return false;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                    attempt++;
+                    continue;
+                }
+                return false;
+            }
+            
+            locked_ = true;
+            return true;
+        }
+    }
+    
+    bool try_lock(FileLock::LockType type) {
+        if (locked_) return true;
+        lock_type_ = type;
+        
+        DWORD lock_flags = (type == FileLock::LockType::Shared) ? 0 : LOCKFILE_EXCLUSIVE_LOCK;
+        DWORD share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+        
+        std::error_code ec;
+        std::filesystem::create_directories(lock_path_.parent_path(), ec);
+        
+        std::wstring wpath = lock_path_.wstring();
+        handle_ = CreateFileW(
+            wpath.c_str(),
+            GENERIC_READ | GENERIC_WRITE,
+            share_mode,
+            nullptr,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,  // Removed FILE_FLAG_DELETE_ON_CLOSE
+            nullptr
+        );
+        
+        if (handle_ == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+        
+        OVERLAPPED overlapped = {0};
+        DWORD flags = lock_flags | LOCKFILE_FAIL_IMMEDIATELY;
+        
+        if (!LockFileEx(handle_, flags, 0, 1, 0, &overlapped)) {
+            CloseHandle(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+            return false;
+        }
+        
+        locked_ = true;
+        return true;
+    }
+    
+    void unlock() {
+        if (!locked_ || handle_ == INVALID_HANDLE_VALUE) return;
+        
+        OVERLAPPED overlapped = {0};
+        if (!UnlockFileEx(handle_, 0, MAXDWORD, MAXDWORD, &overlapped)) {
+            // Ignore errors on unlock
+        }
+        locked_ = false;
+    }
+    
+    bool is_locked() const { return locked_; }
+};
+
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/file.h>
+#include <cerrno>
+
+struct FileLock::Impl {
+    int fd_ = -1;
+    std::filesystem::path lock_path_;
+    bool locked_ = false;
+    FileLock::LockType lock_type_ = FileLock::LockType::Exclusive;
+    
+    explicit Impl(const std::filesystem::path& path) : lock_path_(path) {}
+    
+    ~Impl() {
+        if (locked_) unlock();
+        if (fd_ >= 0) {
+            close(fd_);
+        }
+    }
+    
+    bool lock(FileLock::LockType type, int timeout_ms) {
+        if (locked_) return true;
+        lock_type_ = type;
+        
+        auto start = std::chrono::steady_clock::now();
+        int attempt = 0;
+        
+        while (true) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed >= timeout_ms) return false;
+            
+            std::error_code ec;
+            std::filesystem::create_directories(lock_path_.parent_path(), ec);
+            
+            fd_ = open(lock_path_.c_str(), O_CREAT | O_RDWR, 0644);
+            if (fd_ < 0) {
+                if (errno == ENOENT) {
+                    int sleep_ms = std::min(50, 10 * (attempt + 1));
+                    if (elapsed + sleep_ms > timeout_ms) return false;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                    attempt++;
+                    continue;
+                }
+                return false;
+            }
+            
+            int flock_op = (type == FileLock::LockType::Shared) ? LOCK_SH : LOCK_EX;
+            
+            if (flock(fd_, flock_op) < 0) {
+                int err = errno;
+                close(fd_);
+                fd_ = -1;
+                if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK || err == EDEADLK) {
+                    int sleep_ms = (50 < 10 * (attempt + 1)) ? 50 : 10 * (attempt + 1);
+                    if (elapsed + sleep_ms > timeout_ms) return false;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                    attempt++;
+                    continue;
+                }
+                return false;
+            }
+            
+            locked_ = true;
+            return true;
+        }
+    }
+    
+    bool try_lock(FileLock::LockType type) {
+        if (locked_) return true;
+        lock_type_ = type;
+        
+        std::error_code ec;
+        std::filesystem::create_directories(lock_path_.parent_path(), ec);
+        
+        fd_ = open(lock_path_.c_str(), O_CREAT | O_RDWR, 0644);
+        if (fd_ < 0) return false;
+        
+        int flock_op = (type == FileLock::LockType::Shared) ? (LOCK_SH | LOCK_NB) : (LOCK_EX | LOCK_NB);
+        
+        if (flock(fd_, flock_op) < 0) {
+            close(fd_);
+            fd_ = -1;
+            return false;
+        }
+        
+        locked_ = true;
+        return true;
+    }
+    
+    void unlock() {
+        if (!locked_ || fd_ < 0) return;
+        
+        flock(fd_, LOCK_UN);
+        locked_ = false;
+    }
+    
+    bool is_locked() const { return locked_; }
+};
+
+#endif
+
+FileLock::FileLock(const std::filesystem::path& lock_path) : impl_(std::make_unique<Impl>(lock_path)) {}
+FileLock::~FileLock() = default;
+
+FileLock::FileLock(FileLock&& other) noexcept : impl_(std::move(other.impl_)) {}
+FileLock& FileLock::operator=(FileLock&& other) noexcept {
+    impl_ = std::move(other.impl_);
+    return *this;
+}
+
+bool FileLock::lock(LockType type, int timeout_ms) { return impl_->lock(type, timeout_ms); }
+bool FileLock::try_lock(LockType type) { return impl_->try_lock(type); }
+void FileLock::unlock() { impl_->unlock(); }
+bool FileLock::is_locked() const { return impl_->is_locked(); }
+
+// --- Local Cache Implementation ---
+
+static std::string compute_sha256(const std::string& data) {
+    return remake::crypto::sha256_hex(data);
+}
+
+// Atomic file replacement using MoveFileExW on Windows
+static bool atomic_replace_file(const std::filesystem::path& src, const std::filesystem::path& dst) {
+#ifdef _WIN32
+    std::wstring wsrc = src.wstring();
+    std::wstring wdst = dst.wstring();
+    DWORD attrs = GetFileAttributesW(wdst.c_str());
+    DWORD flags = MOVEFILE_WRITE_THROUGH;
+    if (attrs != INVALID_FILE_ATTRIBUTES) {
+        // Destination exists, replace it
+        flags |= MOVEFILE_REPLACE_EXISTING;
+    }
+    return MoveFileExW(wsrc.c_str(), wdst.c_str(), flags);
+#else
+    std::error_code ec;
+    std::filesystem::rename(src, dst, ec);
+    return !ec;
+#endif
+}
+
+// Compression/Decompression using ZSTD
+#if REMAKE_HAVE_ZSTD
+
+static bool compress_buffer(const std::vector<uint8_t>& input, std::vector<uint8_t>& output, int level = 3) {
+    size_t max_compressed = ZSTD_compressBound(input.size());
+    output.resize(max_compressed);
+    
+    size_t compressed_size = ZSTD_compress(output.data(), output.size(), input.data(), input.size(), level);
+    if (ZSTD_isError(compressed_size)) {
+        return false;
+    }
+    output.resize(compressed_size);
+    return true;
+}
+
+static bool decompress_buffer(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
+    // Get decompressed size from frame header
+    size_t decompressed_size = ZSTD_getFrameContentSize(input.data(), input.size());
+    if (decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN || decompressed_size == ZSTD_CONTENTSIZE_ERROR) {
+        // Fallback: try to decompress with a reasonable upper bound
+        decompressed_size = input.size() * 10; // Assume max 10x compression ratio
+    }
+    
+    output.resize(decompressed_size);
+    
+    size_t decompressed = ZSTD_decompress(output.data(), output.size(), input.data(), input.size());
+    if (ZSTD_isError(decompressed)) {
+        return false;
+    }
+    output.resize(decompressed);
+    return true;
+}
+
+static bool compress_file(const std::filesystem::path& input_path, const std::filesystem::path& output_path, int level = 3) {
+    std::ifstream in(input_path, std::ios::binary);
+    if (!in) return false;
+    
+    std::vector<uint8_t> input_data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    
+    std::vector<uint8_t> compressed;
+    if (!compress_buffer(input_data, compressed, level)) {
+        return false;
+    }
+    
+    std::ofstream out(output_path, std::ios::binary);
+    if (!out) return false;
+    out.write(reinterpret_cast<const char*>(compressed.data()), compressed.size());
+    out.close();
+    return true;
+}
+
+static bool decompress_file(const std::filesystem::path& input_path, const std::filesystem::path& output_path) {
+    std::ifstream in(input_path, std::ios::binary);
+    if (!in) return false;
+    
+    std::vector<uint8_t> compressed_data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    
+    std::vector<uint8_t> decompressed;
+    if (!decompress_buffer(compressed_data, decompressed)) {
+        return false;
+    }
+    
+    std::ofstream out(output_path, std::ios::binary);
+    if (!out) return false;
+    out.write(reinterpret_cast<const char*>(decompressed.data()), decompressed.size());
+    out.close();
+    return true;
+}
+
+#endif // REMAKE_HAVE_ZSTD
+
+// Helper to compute file hash
+static std::string compute_file_hash(const std::filesystem::path& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return "";
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return compute_sha256(content);
+}
+
+// Helper to write meta.json with sidecar info
+static bool write_meta_json(const std::filesystem::path& meta_file, const std::filesystem::path& meta_temp,
+                            const std::string& toolchain_id, int64_t total_size,
+                            const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars) {
+    std::ofstream meta(meta_temp);
+    if (!meta) return false;
+    
+    meta << "{\"toolchain\":\"" << toolchain_id << "\",\"ts\":" << std::time(nullptr) << ",\"size\":" << total_size;
+    meta << ",\"compressed\":true";
+    
+    if (!sidecars.empty()) {
+        meta << ",\"sidecars\":[";
+        for (size_t i = 0; i < sidecars.size(); ++i) {
+            const auto& [path, type] = sidecars[i];
+            std::string type_str;
+            switch (type) {
+                case SidecarType::PDB: type_str = "pdb"; break;
+                case SidecarType::IDB: type_str = "idb"; break;
+                case SidecarType::DWO: type_str = "dwo"; break;
+                default: type_str = "other"; break;
+            }
+            if (i > 0) meta << ",";
+            meta << "{\"name\":\"" << path.filename().string() 
+                 << "\",\"type\":\"" << type_str 
+                 << "\",\"hash\":\"" << compute_file_hash(path) << "\"}";
+        }
+        meta << "]";
+    }
+    meta << "}";
+    meta.flush();
+    meta.close();
+    
+    return atomic_replace_file(meta_temp, meta_file);
+}
+
+// Parse sidecars from meta.json
+static std::vector<std::tuple<std::string, SidecarType, std::string>> parse_sidecars_from_meta(const std::filesystem::path& meta_file) {
+    std::vector<std::tuple<std::string, SidecarType, std::string>> sidecars;
+    
+    std::ifstream f(meta_file);
+    if (!f) return sidecars;
+    
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    
+    // Simple JSON parsing for sidecars array
+    size_t sidecars_pos = content.find("\"sidecars\":");
+    if (sidecars_pos == std::string::npos) return sidecars;
+    
+    size_t start = content.find('[', sidecars_pos);
+    size_t end = content.find(']', start);
+    if (start == std::string::npos || end == std::string::npos) return sidecars;
+    
+    std::string arr = content.substr(start + 1, end - start - 1);
+    
+    // Simple parsing of array elements
+    size_t pos = 0;
+    while (pos < arr.size()) {
+        size_t obj_start = arr.find('{', pos);
+        if (obj_start == std::string::npos) break;
+        size_t obj_end = arr.find('}', obj_start);
+        if (obj_end == std::string::npos) break;
+        
+        std::string obj = arr.substr(obj_start + 1, obj_end - obj_start - 1);
+        
+        // Extract name
+        size_t name_pos = obj.find("\"name\":");
+        if (name_pos == std::string::npos) { pos = obj_end + 1; continue; }
+        size_t name_start = obj.find('"', name_pos + 7);
+        size_t name_end = obj.find('"', name_start + 1);
+        if (name_start == std::string::npos || name_end == std::string::npos) { pos = obj_end + 1; continue; }
+        std::string name = obj.substr(name_start + 1, name_end - name_start - 1);
+        
+        // Extract type
+        size_t type_pos = obj.find("\"type\":");
+        if (type_pos == std::string::npos) { pos = obj_end + 1; continue; }
+        size_t type_start = obj.find('"', type_pos + 7);
+        size_t type_end = obj.find('"', type_start + 1);
+        if (type_start == std::string::npos || type_end == std::string::npos) { pos = obj_end + 1; continue; }
+        std::string type_str = obj.substr(type_start + 1, type_end - type_start - 1);
+        
+        // Extract hash
+        size_t hash_pos = obj.find("\"hash\":");
+        if (hash_pos == std::string::npos) { pos = obj_end + 1; continue; }
+        size_t hash_start = obj.find('"', hash_pos + 7);
+        size_t hash_end = obj.find('"', hash_start + 1);
+        if (hash_start == std::string::npos || hash_end == std::string::npos) { pos = obj_end + 1; continue; }
+        std::string hash = obj.substr(hash_start + 1, hash_end - hash_start - 1);
+        
+        SidecarType type = SidecarType::Other;
+        if (type_str == "pdb") type = SidecarType::PDB;
+        else if (type_str == "idb") type = SidecarType::IDB;
+        else if (type_str == "dwo") type = SidecarType::DWO;
+        
+        sidecars.emplace_back(name, type, hash);
+        pos = obj_end + 1;
+    }
+    
+    return sidecars;
+}
+
+CacheKey Cache::compute_key(const std::filesystem::path& source,
+                            const std::vector<std::string>& includes,
+                            const std::vector<std::string>& flags,
+                            const std::string& compiler_hash,
+                            CompilerType compiler_type) {
+    std::string source_hash = compute_file_hash(source);
+    if (source_hash.empty()) {
+        source_hash = compute_sha256(source.string());
+    }
+    
+    // Normalize source path for key
+    auto build_root = find_build_root(source);
+    std::string norm_source = normalize_path_for_key(source, build_root);
+    
+    // Normalize include paths
+    std::vector<std::string> norm_includes;
+    norm_includes.reserve(includes.size());
+    for (const auto& inc : includes) {
+        norm_includes.push_back(normalize_path_for_key(inc, build_root));
+    }
+    std::sort(norm_includes.begin(), norm_includes.end());
+    
+    // Normalize flags (sort for determinism)
+    std::vector<std::string> norm_flags = flags;
+    std::sort(norm_flags.begin(), norm_flags.end());
+    
+    // Get relevant environment hash
+    std::string env_hash = get_relevant_env_hash();
+
+    std::ostringstream oss;
+    oss << source_hash << "|" << norm_source;
+    for (const auto& inc : norm_includes) {
+        oss << "|" << inc;
+    }
+    for (const auto& flag : norm_flags) {
+        oss << "|" << flag;
+    }
+    oss << "|" << compiler_hash;
+    oss << "|" << static_cast<int>(compiler_type);
+    oss << "|" << env_hash;
+
+    CacheKey key;
+    key.hash = compute_sha256(oss.str());
+    key.toolchain_id = compiler_hash;
+    return key;
+}
+
+CacheKey Cache::compute_key_from_command(const CompileCommand& cmd) {
+    // Create a modified copy with normalized paths
+    std::vector<std::string> norm_includes;
+    norm_includes.reserve(cmd.includes.size());
+    auto build_root = find_build_root(cmd.source);
+    for (const auto& inc : cmd.includes) {
+        norm_includes.push_back(normalize_path_for_key(inc, build_root));
+    }
+    std::sort(norm_includes.begin(), norm_includes.end());
+    
+    std::vector<std::string> norm_flags = cmd.flags;
+    std::sort(norm_flags.begin(), norm_flags.end());
+    
+    return compute_key(cmd.source, norm_includes, norm_flags, cmd.compiler_hash, 
+                       remake::detect_compiler(cmd.compiler_path).type);
+}
+
+// Generate unique temporary file path
+static std::filesystem::path make_temp_path(const std::filesystem::path& base_dir, const std::string& prefix) {
+    std::ostringstream oss;
+    oss << prefix << "_" << std::this_thread::get_id() << "_" << std::chrono::steady_clock::now().time_since_epoch().count() << ".tmp";
+    return base_dir / oss.str();
+}
+
+bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs,
+                const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars) {
+    int64_t total_size = 0;
+    int64_t max_cache_size = config_.max_cache_size_bytes;
+    bool success = false;
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+        std::filesystem::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+        std::filesystem::path lock_file = key_dir / ".lock";
+        
+        FileLock file_lock(lock_file);
+        FileLock::ScopedLock scoped_lock(file_lock, FileLock::LockType::Exclusive);
+        if (!scoped_lock) return false;
+
+        std::error_code ec;
+        std::filesystem::create_directories(key_dir, ec);
+        if (ec) return false;
+
+        std::vector<std::pair<std::filesystem::path, SidecarType>> stored_sidecars;
+        
+        #if REMAKE_HAVE_ZSTD
+        // Store primary outputs (with compression)
+        std::vector<std::pair<std::filesystem::path, bool>> stored_outputs; // {path, is_compressed}
+        for (const auto& output : outputs) {
+            if (!std::filesystem::exists(output)) continue;
+            
+            std::filesystem::path dest = key_dir / (output.filename().string() + ".zst");
+            std::filesystem::path temp_dest = make_temp_path(key_dir, "cache_" + output.filename().string() + ".zst");
+            
+            // Compress file
+            if (!compress_file(output, temp_dest)) {
+                return false;
+            }
+            
+            // Atomic replace
+            if (!atomic_replace_file(temp_dest, dest)) {
+                std::error_code ec2;
+                std::filesystem::remove(temp_dest, ec2);
+                return false;
+            }
+            
+            total_size += std::filesystem::file_size(dest, ec);
+            stored_outputs.emplace_back(dest, true);
+        }
+        
+        // Store sidecar files (with compression)
+        for (const auto& [sidecar_path, sidecar_type] : sidecars) {
+            if (!std::filesystem::exists(sidecar_path)) continue;
+            
+            std::filesystem::path dest = key_dir / (sidecar_path.filename().string() + ".zst");
+            std::filesystem::path temp_dest = make_temp_path(key_dir, "cache_" + sidecar_path.filename().string() + ".zst");
+            
+            // Compress file
+            if (!compress_file(sidecar_path, temp_dest)) {
+                return false;
+            }
+            
+            // Atomic replace
+            if (!atomic_replace_file(temp_dest, dest)) {
+                std::error_code ec2;
+                std::filesystem::remove(temp_dest, ec2);
+                return false;
+            }
+            
+            total_size += std::filesystem::file_size(dest, ec);
+            stored_sidecars.emplace_back(dest, sidecar_type);
+        }
+        #else
+        // Store primary outputs (without compression)
+        for (const auto& output : outputs) {
+            if (!std::filesystem::exists(output)) continue;
+            
+            std::filesystem::path dest = key_dir / output.filename();
+            std::filesystem::path temp_dest = make_temp_path(key_dir, "cache_" + output.filename().string());
+            
+            // Copy to temp file first
+            std::filesystem::copy_file(output, temp_dest, std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) return false;
+            
+            // Atomic replace
+            if (!atomic_replace_file(temp_dest, dest)) {
+                std::error_code ec2;
+                std::filesystem::remove(temp_dest, ec2);
+                return false;
+            }
+            
+            total_size += std::filesystem::file_size(output, ec);
+        }
+        
+        // Store sidecar files
+        for (const auto& [sidecar_path, sidecar_type] : sidecars) {
+            if (!std::filesystem::exists(sidecar_path)) continue;
+            
+            std::filesystem::path dest = key_dir / sidecar_path.filename();
+            std::filesystem::path temp_dest = make_temp_path(key_dir, "cache_" + sidecar_path.filename().string());
+            
+            // Copy to temp file first
+            std::filesystem::copy_file(sidecar_path, temp_dest, std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) return false;
+            
+            // Atomic replace
+            if (!atomic_replace_file(temp_dest, dest)) {
+                std::error_code ec2;
+                std::filesystem::remove(temp_dest, ec2);
+                return false;
+            }
+            
+            total_size += std::filesystem::file_size(sidecar_path, ec);
+            stored_sidecars.emplace_back(dest, sidecar_type);
+        }
+        #endif
+        
+        // Write meta.json atomically with sidecar info and compression info
+        std::filesystem::path meta_file = key_dir / "meta.json";
+        std::filesystem::path meta_temp = make_temp_path(key_dir, "meta");
+        if (!write_meta_json(meta_file, meta_temp, key.toolchain_id, total_size, stored_sidecars)) {
+            return false;
+        }
+        
+        success = true;
+    }
+    
+    // Update cache size stats after releasing all locks
+    if (success) {
+        stats_tracker_->update_cache_size(1, total_size, max_cache_size);
+    }
+    
+    return success;
+}
+
+std::optional<CacheEntry> Cache::safe_get(const CacheKey& key) const {
+    try {
+        auto entry = get(key);
+        if (entry) return entry;
+        return std::nullopt;
+    } catch (const std::filesystem::filesystem_error& e) {
+        std::cerr << "[build-cache warning] Cache read failed: " << e.what() << ". Falling back to native compilation.\n";
+        try {
+            std::filesystem::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+            std::error_code ec;
+            std::filesystem::remove_all(key_dir, ec);
+        } catch (...) {}
+    } catch (const std::exception& e) {
+        std::cerr << "[build-cache warning] Cache read failed: " << e.what() << ". Falling back to native compilation.\n";
+        try {
+            std::filesystem::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+            std::error_code ec;
+            std::filesystem::remove_all(key_dir, ec);
+        } catch (...) {}
+    } catch (...) {
+        std::cerr << "[build-cache warning] Cache read failed: unknown error. Falling back to native compilation.\n";
+        try {
+            std::filesystem::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+            std::error_code ec;
+            std::filesystem::remove_all(key_dir, ec);
+        } catch (...) {}
+    }
+    stats_tracker_->record_miss();
+    return std::nullopt;
+}
+
+bool Cache::safe_put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs,
+                     const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars) {
+    try {
+        return put(key, outputs, sidecars);
+    } catch (const std::filesystem::filesystem_error& e) {
+        std::cerr << "[build-cache warning] Cache write failed: " << e.what() << ". Build output preserved.\n";
+        return false;
+    } catch (const std::exception& e) {
+        std::cerr << "[build-cache warning] Cache write failed: " << e.what() << ". Build output preserved.\n";
+        return false;
+    } catch (...) {
+        std::cerr << "[build-cache warning] Cache write failed: unknown error. Build output preserved.\n";
+        return false;
+    }
+}
+
+std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
+    // First, acquire the cache mutex to do the lookup
+    std::optional<CacheEntry> result;
+    bool hit = false;
+    int64_t entry_size = 0;
+    
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+        std::filesystem::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+        std::filesystem::path lock_file = key_dir / ".lock";
+        
+        FileLock file_lock(lock_file);
+        FileLock::ScopedLock scoped_lock(file_lock, FileLock::LockType::Shared);
+        if (!scoped_lock) {
+            // Cache mutex released here (lock goes out of scope)
+        } else {
+            std::filesystem::path meta_file = key_dir / "meta.json";
+
+            if (!std::filesystem::exists(meta_file)) {
+                // Cache mutex released here
+            } else {
+                std::error_code ec;
+                // Validate meta.json has expected content
+                std::ifstream meta_check(meta_file);
+                std::string meta_content((std::istreambuf_iterator<char>(meta_check)), std::istreambuf_iterator<char>());
+                if (meta_content.find("\"toolchain\"") == std::string::npos) {
+                    // Corrupted meta.json - purge and return nullopt
+                    FileLock file_lock_excl(lock_file);
+                    FileLock::ScopedLock excl_lock(file_lock_excl, FileLock::LockType::Exclusive);
+                    if (excl_lock) {
+                        std::filesystem::remove_all(key_dir, ec);
+                    }
+                    // Cache mutex released here
+                } else {
+                    CacheEntry entry;
+                    entry.key = key;
+                    entry.timestamp = std::time(nullptr);
+                    entry.size_bytes = 0;
+
+                    bool has_corrupted = false;
+                    for (auto& f : std::filesystem::directory_iterator(key_dir, ec)) {
+                        if (f.path().filename() != "meta.json" && f.path().filename() != ".lock") {
+                            auto size = std::filesystem::file_size(f.path(), ec);
+                            if (size == 0) {
+                                has_corrupted = true;
+                                break;
+                            }
+                            // Check if it's a compressed file (.zst)
+                            std::string ext = f.path().extension().string();
+                            #if REMAKE_HAVE_ZSTD
+                            if (ext == ".zst") {
+                                // Decompress to expected destination path (remove .zst extension)
+                                std::filesystem::path dest_path = key_dir / f.path().stem();
+                                if (!decompress_file(f.path(), dest_path)) {
+                                    has_corrupted = true;
+                                    break;
+                                }
+                                
+                                // Check if it's a sidecar file
+                                std::string stem_ext = dest_path.extension().string();
+                                if (stem_ext == ".pdb" || stem_ext == ".idb" || stem_ext == ".dwo") {
+                                    SidecarInfo si;
+                                    si.relative_path = dest_path.filename();
+                                    si.hash = compute_file_hash(dest_path);
+                                    
+                                    if (stem_ext == ".pdb") si.type = SidecarType::PDB;
+                                    else if (stem_ext == ".idb") si.type = SidecarType::IDB;
+                                    else if (stem_ext == ".dwo") si.type = SidecarType::DWO;
+                                    else si.type = SidecarType::Other;
+                                    
+                                    entry.sidecars.push_back(si);
+                                } else {
+                                    entry.outputs.push_back(dest_path);
+                                }
+                                entry.size_bytes += std::filesystem::file_size(dest_path, ec);
+                            } else
+                            #endif
+                            {
+                                // Uncompressed file (legacy)
+                                // Check if it's a sidecar file by checking extension
+                                if (ext == ".pdb" || ext == ".idb" || ext == ".dwo") {
+                                    SidecarInfo si;
+                                    si.relative_path = f.path().filename();
+                                    si.hash = compute_file_hash(f.path());
+                                    
+                                    if (ext == ".pdb") si.type = SidecarType::PDB;
+                                    else if (ext == ".idb") si.type = SidecarType::IDB;
+                                    else if (ext == ".dwo") si.type = SidecarType::DWO;
+                                    else si.type = SidecarType::Other;
+                                    
+                                    entry.sidecars.push_back(si);
+                                } else {
+                                    entry.outputs.push_back(f.path());
+                                }
+                                entry.size_bytes += size;
+                            }
+                        }
+                    }
+
+                    // Parse sidecars from meta.json for additional metadata (hashes, types)
+                    auto meta_sidecars = parse_sidecars_from_meta(meta_file);
+                    for (const auto& [name, type, hash] : meta_sidecars) {
+                        // Find matching sidecar in entry
+                        for (auto& si : entry.sidecars) {
+                            if (si.relative_path.filename().string() == name) {
+                                si.hash = hash;
+                                si.type = type;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Check for zero-byte outputs or missing outputs
+                    if (entry.outputs.empty() || has_corrupted) {
+                        // Release shared lock (via scoped_lock destructor) and acquire exclusive lock to purge
+                    }
+                    
+                    if (entry.outputs.empty() || has_corrupted) {
+                        // scoped_lock goes out of scope here, releasing the shared lock
+                        FileLock file_lock_excl(lock_file);
+                        FileLock::ScopedLock excl_lock(file_lock_excl, FileLock::LockType::Exclusive);
+                        if (excl_lock) {
+                            std::filesystem::remove_all(key_dir, ec);
+                        }
+                        // Cache mutex released here
+                    } else {
+                        update_access_time(key.hash);
+                        hit = true;
+                        entry_size = entry.size_bytes;
+                        result = std::move(entry);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Record stats OUTSIDE the cache mutex
+    if (hit) {
+        stats_tracker_->record_hit(1000, entry_size); // 1000ms estimated compile time saved
+    } else {
+        stats_tracker_->record_miss();
+    }
+    
+    return result;
+}
+
+void Cache::update_access_time(const std::string& hash) const {
+    std::filesystem::path key_dir = root_ / hash.substr(0, 2) / hash.substr(2, 2) / hash;
+    std::filesystem::path lock_file = key_dir / ".lock";
+    
+    FileLock file_lock(lock_file);
+    FileLock::ScopedLock scoped_lock(file_lock, FileLock::LockType::Shared);
+    if (!scoped_lock) return;
+    
+    std::filesystem::path meta_file = key_dir / "meta.json";
+    if (std::filesystem::exists(meta_file)) {
+        std::error_code ec;
+        auto now = std::chrono::system_clock::now();
+        auto tt = std::chrono::system_clock::to_time_t(now);
+        std::filesystem::last_write_time(meta_file, std::filesystem::file_time_type::clock::now(), ec);
+    }
+}
+
+std::vector<Cache::EntryMeta> Cache::collect_entries() const {
+    std::vector<EntryMeta> entries;
+    std::error_code ec;
+
+    if (!std::filesystem::exists(root_)) return entries;
+
+    for (auto& d1 : std::filesystem::directory_iterator(root_, ec)) {
+        for (auto& d2 : std::filesystem::directory_iterator(d1.path(), ec)) {
+            for (auto& d3 : std::filesystem::directory_iterator(d2.path(), ec)) {
+                std::filesystem::path meta_file = d3.path() / "meta.json";
+                if (std::filesystem::exists(meta_file)) {
+                    EntryMeta meta;
+                    meta.path = d3.path();
+                    meta.timestamp = std::filesystem::last_write_time(meta_file, ec).time_since_epoch().count();
+                    meta.size_bytes = 0;
+                    meta.last_access = meta.timestamp;
+                    for (auto& f : std::filesystem::directory_iterator(d3.path(), ec)) {
+                        if (f.path().filename() != "meta.json" && f.path().filename() != ".lock") {
+                            meta.size_bytes += std::filesystem::file_size(f.path(), ec);
+                        }
+                    }
+                    entries.push_back(std::move(meta));
+                }
+            }
+        }
+    }
+    return entries;
+}
+
+void Cache::purge_corrupted_entry(const EntryMeta& entry) const {
+    std::filesystem::path lock_file = entry.path / ".lock";
+    FileLock file_lock(lock_file);
+    FileLock::ScopedLock scoped_lock(file_lock, FileLock::LockType::Exclusive);
+    if (!scoped_lock) return;
+    
+    std::error_code ec;
+    std::filesystem::remove_all(entry.path, ec);
+}
+
+void Cache::prune(int64_t max_size_bytes, int max_age_days) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    
+    // Use config defaults if not explicitly provided
+    if (max_size_bytes < 0) max_size_bytes = config_.max_cache_size_bytes;
+    if (max_age_days < 0) max_age_days = config_.max_age_days;
+    double target_ratio = config_.eviction_target_ratio;
+    
+    auto entries = collect_entries();
+    if (entries.empty()) return;
+    
+    // First pass: purge corrupted/zero-byte entries
+    std::vector<EntryMeta> valid_entries;
+    for (const auto& e : entries) {
+        bool corrupted = false;
+        std::error_code ec;
+        
+        // Check if meta.json exists
+        std::filesystem::path meta_file = e.path / "meta.json";
+        if (!std::filesystem::exists(meta_file)) {
+            corrupted = true;
+        } else {
+            // Check for zero-byte or missing object files
+            bool has_valid_output = false;
+            for (auto& f : std::filesystem::directory_iterator(e.path, ec)) {
+                if (f.path().filename() != "meta.json" && f.path().filename() != ".lock") {
+                    auto size = std::filesystem::file_size(f.path(), ec);
+                    if (size > 0) {
+                        has_valid_output = true;
+                        break;
+                    }
+                }
+            }
+            if (!has_valid_output) {
+                corrupted = true;
+            }
+        }
+        
+        if (corrupted) {
+            purge_corrupted_entry(e);
+        } else {
+            valid_entries.push_back(e);
+        }
+    }
+    
+    if (valid_entries.empty()) return;
+    
+    // Sort by last access time (oldest first) for LRU
+    std::sort(valid_entries.begin(), valid_entries.end(), [](const EntryMeta& a, const EntryMeta& b) {
+        return a.last_access < b.last_access;
+    });
+    
+    // Age-based eviction
+    auto now = std::chrono::system_clock::now();
+    auto cutoff = now - std::chrono::hours(24 * max_age_days);
+    
+    int64_t current_size = 0;
+    for (const auto& e : valid_entries) current_size += e.size_bytes;
+    
+    // First, evict entries older than max_age_days
+    for (const auto& e : valid_entries) {
+        if (current_size <= max_size_bytes) break;
+        if (std::chrono::time_point<std::chrono::system_clock, std::chrono::nanoseconds>(std::chrono::nanoseconds(e.last_access)) > cutoff) continue;
+        
+        // Mutex protects us in single-process case; file lock is for inter-process
+        // Skip file lock here since we need to delete the lock file itself
+        std::error_code ec;
+        std::filesystem::remove_all(e.path, ec);
+        if (!ec) {
+            current_size -= e.size_bytes;
+        }
+    }
+    
+    // Then, LRU eviction until we reach target_ratio of max_size_bytes
+    int64_t target_size = static_cast<int64_t>(max_size_bytes * target_ratio);
+    if (current_size > target_size) {
+        for (const auto& e : valid_entries) {
+            if (current_size <= target_size) break;
+            
+            // Mutex protects us in single-process case; file lock is for inter-process
+            // Skip file lock here since we need to delete the lock file itself
+            std::error_code ec;
+            std::filesystem::remove_all(e.path, ec);
+            if (!ec) {
+                current_size -= e.size_bytes;
+            }
+        }
+    }
+}
+
+Cache::Stats Cache::get_stats() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+    Stats stats;
+    auto entries = collect_entries();
+    stats.entries = entries.size();
+    for (const auto& e : entries) {
+        stats.total_size += e.size_bytes;
+    }
+    return stats;
+}
+
+#ifdef _WIN32
+std::string to_long_path(const std::string& path) {
+    if (path.size() >= 260 && path.find("\\\\?\\") != 0) {
+        return "\\\\?\\" + path;
+    }
+    return path;
+}
+
+std::string from_long_path(const std::string& path) {
+    if (path.find("\\\\?\\") == 0) {
+        return path.substr(4);
+    }
+    return path;
+}
+
+std::filesystem::path normalize_path(const std::filesystem::path& path) {
+    std::string p = to_long_path(path.string());
+    return std::filesystem::path(p);
+}
+#endif
+
+CompilerInfo detect_compiler(const std::string& compiler_path) {
+    CompilerInfo info;
+    info.path = compiler_path;
+    
+    std::string name = std::filesystem::path(compiler_path).filename().string();
+    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    
+    if (name.find("cl.exe") != std::string::npos || name.find("clang-cl") != std::string::npos) {
+        info.type = CompilerType::MSVC;
+    } else if (name.find("clang") != std::string::npos) {
+        info.type = CompilerType::Clang;
+    } else if (name.find("gcc") != std::string::npos || name.find("g++") != std::string::npos) {
+        info.type = CompilerType::GCC;
+    } else {
+        info.type = CompilerType::Unknown;
+    }
+    
+    info.version_string = "unknown";
+    info.hash = get_compiler_hash(compiler_path);
+    return info;
+}
+
+std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
+    CompileCommand cmd;
+    bool is_compile = false;
+    
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-c" || arg == "/c") {
+            is_compile = true;
+            cmd.args.push_back(arg);
+        } else if ((arg == "-o" || arg == "/Fo") && i + 1 < argc) {
+            cmd.output = argv[++i];
+            cmd.args.push_back(arg);
+            cmd.args.push_back(argv[i]);
+        } else if (arg.rfind("-I", 0) == 0 || arg.rfind("/I", 0) == 0) {
+            std::string prefix = arg.rfind("-I", 0) == 0 ? "-I" : "/I";
+            cmd.includes.push_back(arg.substr(prefix.size()));
+            cmd.args.push_back(arg);
+        } else if ((arg == "-I" || arg == "/I") && i + 1 < argc) {
+            cmd.includes.push_back(argv[++i]);
+            cmd.args.push_back(arg);
+            cmd.args.push_back(argv[i]);
+        } else if (arg.rfind("-std=", 0) == 0 || arg.rfind("-O", 0) == 0 || arg.rfind("-g", 0) == 0 || arg.rfind("-Wall", 0) == 0 || arg.rfind("-W", 0) == 0) {
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+        } else if (arg == "/Zi" || arg == "/ZI") {
+            // MSVC debug info flags
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+            cmd.has_debug_info = true;
+        } else if (arg.rfind("/Fo", 0) == 0) {
+            // MSVC output file: /Fo<path> or /Fo <path>
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+            std::string output_path = arg.substr(3);
+            if (!output_path.empty()) {
+                cmd.output = output_path;
+            } else if (i + 1 < argc) {
+                cmd.output = argv[++i];
+                cmd.args.push_back(cmd.output.string());
+            }
+        } else if (arg == "-gsplit-dwarf") {
+            // GCC/Clang Split DWARF
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+            cmd.has_debug_info = true;
+            // Expected .dwo file is <output_name>.dwo
+            if (!cmd.output.empty()) {
+                fs::path dwo_path = cmd.output;
+                dwo_path.replace_extension(".dwo");
+                cmd.expected_sidecars.push_back(dwo_path.string());
+                cmd.expected_sidecar_types.push_back(SidecarType::DWO);
+            }
+        } else if (arg.rfind("-g", 0) == 0) {
+            // Generic debug flag (-g, -g3, etc.)
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+            cmd.has_debug_info = true;
+        } else if (arg.rfind("-std=", 0) == 0 || arg.rfind("-O", 0) == 0 || arg.rfind("-Wall", 0) == 0 || arg.rfind("-W", 0) == 0) {
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+        } else if (std::filesystem::path(arg).extension() == ".cpp" || std::filesystem::path(arg).extension() == ".cc" || std::filesystem::path(arg).extension() == ".cxx" || std::filesystem::path(arg).extension() == ".c") {
+            cmd.source = arg;
+            cmd.args.push_back(arg);
+        } else {
+            cmd.args.push_back(arg);
+        }
+    }
+    
+    if (!is_compile || cmd.source.empty()) {
+        return std::nullopt;
+    }
+    
+    cmd.compiler_path = argv[0];
+    auto info = detect_compiler(cmd.compiler_path);
+    cmd.compiler_hash = info.hash;
+
+    // Infer output file for MSVC if not specified (cl.exe creates .obj with same basename as source)
+    if (info.type == CompilerType::MSVC && cmd.output.empty() && !cmd.source.empty()) {
+        fs::path src_path(cmd.source);
+        cmd.output = src_path.replace_extension(".obj");
+    }
+
+    // If debug info is enabled but no specific sidecar paths were set, infer them
+    if (cmd.has_debug_info && cmd.expected_sidecars.empty()) {
+        if (info.type == CompilerType::MSVC) {
+            // Default MSVC PDB path: <output_dir>/vc<version>.pdb or <output_name>.pdb
+            if (!cmd.output.empty()) {
+                fs::path pdb_path = cmd.output;
+                pdb_path.replace_extension(".pdb");
+                cmd.expected_sidecars.push_back(pdb_path.string());
+                cmd.expected_sidecar_types.push_back(SidecarType::PDB);
+            }
+        } else if (info.type == CompilerType::GCC || info.type == CompilerType::Clang) {
+            // Default GCC/Clang: debug info in object file unless -gsplit-dwarf
+            // For -g, debug info is embedded in .o, no separate sidecar
+        }
+    }
+    
+    return cmd;
+}
+
+std::vector<std::string> get_dependencies(char** argv, int argc) {
+    std::vector<std::string> deps;
+    return deps;
+}
+
+LinkerType detect_linker_type(const std::string& linker_path) {
+    std::string name = std::filesystem::path(linker_path).filename().string();
+    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    
+    if (name.find("link.exe") != std::string::npos || name.find("lld-link") != std::string::npos) {
+        return LinkerType::MSVC;
+    } else if (name.find("ld.lld") != std::string::npos || name.find("lld") != std::string::npos) {
+        return LinkerType::LLVM_LLD;
+    } else if (name.find("g++") != std::string::npos || name.find("clang++") != std::string::npos) {
+        return LinkerType::GCC;
+    }
+    return LinkerType::Unknown;
+}
+
+std::optional<LinkerCommand> parse_linker_command(int argc, char* argv[]) {
+    LinkerCommand cmd;
+    cmd.linker_path = argv[0];
+    cmd.linker_hash = get_compiler_hash(cmd.linker_path);
+    cmd.type = detect_linker_type(cmd.linker_path);
+    
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg.rfind("/OUT:", 0) == 0 || arg == "-o" || arg.rfind("-o", 0) == 0) {
+            if (arg == "-o" && i + 1 < argc) {
+                cmd.output = argv[++i];
+            } else if (arg.rfind("-o", 0) == 0) {
+                cmd.output = arg.substr(2);
+            } else {
+                cmd.output = arg.substr(5);
+            }
+        } else if (arg.rfind("/LIBPATH:", 0) == 0 || arg.rfind("-L", 0) == 0) {
+            cmd.library_dirs.push_back(arg);
+        } else if (arg.rfind("/DEFAULTLIB:", 0) == 0 || arg.rfind("-l", 0) == 0) {
+            cmd.libraries.push_back(arg);
+        } else {
+            std::filesystem::path p(arg);
+            if (p.extension() == ".obj" || p.extension() == ".o" || p.extension() == ".lib" || p.extension() == ".a") {
+                cmd.inputs.push_back(p);
+            } else if (p.extension() == ".exe" || p.extension() == ".dll" || p.extension() == ".so") {
+                if (cmd.output.empty()) cmd.output = p;
+            }
+            cmd.args.push_back(arg);
+        }
+    }
+    
+    if (cmd.output.empty()) return std::nullopt;
+    return cmd;
+}
+
+CacheKey compute_linker_key(const LinkerCommand& cmd) {
+    std::ostringstream oss;
+    oss << "link|";
+    
+    // Normalize input paths
+    std::vector<std::string> norm_inputs;
+    norm_inputs.reserve(cmd.inputs.size());
+    for (const auto& input : cmd.inputs) {
+        norm_inputs.push_back(normalize_path_for_key(input));
+    }
+    std::sort(norm_inputs.begin(), norm_inputs.end());
+    for (const auto& input : norm_inputs) {
+        oss << input << "|";
+    }
+    
+    // Normalize library paths
+    std::vector<std::string> norm_libs = cmd.libraries;
+    std::sort(norm_libs.begin(), norm_libs.end());
+    for (const auto& lib : norm_libs) {
+        oss << lib << "|";
+    }
+    
+    // Normalize library dirs
+    std::vector<std::string> norm_dirs;
+    norm_dirs.reserve(cmd.library_dirs.size());
+    for (const auto& dir : cmd.library_dirs) {
+        norm_dirs.push_back(normalize_path_for_key(dir));
+    }
+    std::sort(norm_dirs.begin(), norm_dirs.end());
+    for (const auto& dir : norm_dirs) {
+        oss << dir << "|";
+    }
+    
+    // Normalize output path
+    std::string norm_output = normalize_path_for_key(cmd.output);
+    oss << norm_output << "|";
+    oss << cmd.linker_hash << "|";
+    
+    // Include relevant environment hash
+    std::string env_hash = get_relevant_env_hash();
+    oss << env_hash;
+    
+    CacheKey key;
+    key.hash = compute_sha256(oss.str());
+    key.toolchain_id = cmd.linker_hash;
+    return key;
+}
+
+// Compute compiler hash from binary content + version string + mtime
+std::string get_compiler_hash(const std::string& compiler_path) {
+    std::filesystem::path path(compiler_path);
+    if (!std::filesystem::exists(path)) {
+        return std::to_string(std::hash<std::string>{}(compiler_path));
+    }
+    
+    std::ostringstream oss;
+    
+    // Hash file size and mtime
+    auto ftime = std::filesystem::last_write_time(path);
+    auto file_size = std::filesystem::file_size(path);
+    oss << file_size << "|" << ftime.time_since_epoch().count();
+    
+    // Get compiler version string
+    std::string version_cmd;
+    #ifdef _WIN32
+    version_cmd = "\"" + compiler_path + "\" --version 2>&1";
+    #else
+    version_cmd = compiler_path + " --version 2>&1";
+    #endif
+    
+    std::array<char, 128> buffer;
+    std::string version_output;
+    #ifdef _WIN32
+    std::unique_ptr<FILE, decltype(&_pclose)> pipe(_popen(version_cmd.c_str(), "r"), _pclose);
+    #else
+    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(version_cmd.c_str(), "r"), pclose);
+    #endif
+    if (pipe) {
+        while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+            version_output += buffer.data();
+        }
+    }
+    
+    // Hash first few lines of version output (to avoid build timestamps)
+    std::istringstream iss(version_output);
+    std::string line;
+    int line_count = 0;
+    while (std::getline(iss, line) && line_count < 5) {
+        if (!line.empty()) {
+            oss << "|" << line;
+            line_count++;
+        }
+    }
+    
+    return compute_sha256(oss.str());
+}
+
+std::string get_compiler_hash_with_version(const std::string& compiler_path) {
+    return get_compiler_hash(compiler_path);
+}
+
+std::string get_linker_hash(const std::string& linker_path) {
+    return get_compiler_hash(linker_path);
+}
+
+// Normalize path for cache key: strip build root prefix, normalize separators, case
+std::string normalize_path_for_key(const std::filesystem::path& path, const std::filesystem::path& build_root) {
+    std::filesystem::path normalized = std::filesystem::weakly_canonical(path);
+    std::string path_str = normalized.string();
+    
+    // Normalize path separators to forward slash
+    std::replace(path_str.begin(), path_str.end(), '\\', '/');
+    
+    // On Windows, normalize case (lowercase)
+    #ifdef _WIN32
+    std::transform(path_str.begin(), path_str.end(), path_str.begin(), ::tolower);
+    #endif
+    
+    // Strip build root prefix if provided
+    if (!build_root.empty()) {
+        std::filesystem::path root_canon = std::filesystem::weakly_canonical(build_root);
+        std::string root_str = root_canon.string();
+        std::replace(root_str.begin(), root_str.end(), '\\', '/');
+        #ifdef _WIN32
+        std::transform(root_str.begin(), root_str.end(), root_str.begin(), ::tolower);
+        #endif
+        
+        if (path_str.rfind(root_str, 0) == 0) {  // starts with root_str
+            if (path_str.size() == root_str.size() || path_str[root_str.size()] == '/') {
+                path_str = path_str.substr(root_str.size());
+                if (!path_str.empty() && path_str[0] == '/') {
+                    path_str = path_str.substr(1);
+                }
+            }
+        }
+    }
+    
+    return path_str;
+}
+
+// Find build root (common ancestor of source files, or project root with CMakeLists.txt, etc.)
+std::filesystem::path find_build_root(const std::filesystem::path& source_file) {
+    std::filesystem::path current = std::filesystem::weakly_canonical(source_file).parent_path();
+    
+    while (!current.empty() && current != current.root_path()) {
+        // Check for common build root markers
+        if (std::filesystem::exists(current / "CMakeLists.txt") ||
+            std::filesystem::exists(current / "meson.build") ||
+            std::filesystem::exists(current / "Makefile") ||
+            std::filesystem::exists(current / "build.ninja") ||
+            std::filesystem::exists(current / ".git") ||
+            std::filesystem::exists(current / "compile_commands.json")) {
+            return current;
+        }
+        current = current.parent_path();
+    }
+    
+    // Fallback: use parent directory of source
+    return std::filesystem::weakly_canonical(source_file).parent_path();
+}
+
+// Get hash of relevant environment variables that affect compilation
+std::string get_relevant_env_hash() {
+    // Environment variables that affect compiler output
+    static const std::vector<std::string> relevant_vars = {
+        // Include/library paths
+        "INCLUDE", "LIB", "LIBPATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
+        "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+        // Compiler flags
+        "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "CL", "_CL_", "CC", "CXX",
+        // MSVC specific
+        "VCINSTALLDIR", "WINDOWSSDKDIR", "UNIVERSALCRTSDKDIR",
+        // Preprocessor defines
+        "DEFINES", "DEFINES_DEBUG", "DEFINES_RELEASE",
+        // Language standards
+        "CSTD", "CXXSTD",
+        // Optimization/debug
+        "OPTIMIZE", "DEBUG"
+    };
+    
+    std::ostringstream oss;
+    for (const auto& var : relevant_vars) {
+        if (const char* val = std::getenv(var.c_str())) {
+            oss << var << "=" << val << "\n";
+        }
+    }
+    
+    return compute_sha256(oss.str());
+}
+
+std::vector<std::string> get_relevant_env_vars() {
+    static const std::vector<std::string> relevant_vars = {
+        "INCLUDE", "LIB", "LIBPATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
+        "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+        "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "CL", "_CL_", "CC", "CXX",
+        "VCINSTALLDIR", "WINDOWSSDKDIR", "UNIVERSALCRTSDKDIR",
+        "DEFINES", "DEFINES_DEBUG", "DEFINES_RELEASE",
+        "CSTD", "CXXSTD", "OPTIMIZE", "DEBUG"
+    };
+    return relevant_vars;
+}
+
+// Execute native compiler directly with full stdout/stderr passthrough
+FallbackResult execute_native_compiler(const std::vector<std::string>& args, const std::string& compiler_path) {
+    FallbackResult result;
+    result.fallback_used = true;
+    
+    if (args.empty()) {
+        result.error_message = "No compiler arguments provided";
+        result.exit_code = -1;
+        return result;
+    }
+    
+    std::string cmd_to_run = compiler_path.empty() ? args[0] : compiler_path;
+    std::vector<std::string> full_args = args;
+    if (!compiler_path.empty()) {
+        full_args[0] = compiler_path;
+    }
+    
+    // Build command line with proper quoting
+    std::string cmdline;
+    for (size_t i = 0; i < full_args.size(); ++i) {
+        if (i > 0) cmdline += " ";
+        if (full_args[i].find(' ') != std::string::npos || full_args[i].find('"') != std::string::npos) {
+            cmdline += "\"" + full_args[i] + "\"";
+        } else {
+            cmdline += full_args[i];
+        }
+    }
+    
+    #ifdef _WIN32
+    // Use _popen for capturing output on Windows
+    std::string capture_cmd = cmdline + " 2>&1";
+    FILE* pipe = _popen(capture_cmd.c_str(), "r");
+    if (!pipe) {
+        result.error_message = "Failed to execute compiler: " + cmd_to_run;
+        result.exit_code = -1;
+        return result;
+    }
+    
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        result.stdout_output += buffer;
+    }
+    
+    int exit_code = _pclose(pipe);
+    result.exit_code = exit_code;
+    #else
+    // Use popen for capturing output on Unix
+    std::string capture_cmd = cmdline + " 2>&1";
+    FILE* pipe = popen(capture_cmd.c_str(), "r");
+    if (!pipe) {
+        result.error_message = "Failed to execute compiler: " + cmd_to_run;
+        result.exit_code = -1;
+        return result;
+    }
+    
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        result.stdout_output += buffer;
+    }
+    
+    int exit_code = pclose(pipe);
+    result.exit_code = WEXITSTATUS(exit_code);
+    #endif
+    
+    // If we got stderr mixed in stdout, that's fine - passthrough
+    if (result.exit_code != 0) {
+        if (result.error_message.empty()) {
+            result.error_message = "Compiler exited with code " + std::to_string(result.exit_code);
+        }
+    }
+    
+    return result;
+}
+
+} // namespace remake

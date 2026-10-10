@@ -1,0 +1,21 @@
+Starting sidecar test...
+Key hash: 9f8c3d87523fd0d5...
+Testing sidecar file caching...
+Putting...
+Put returned: 1
+Put result: success
+Cache directory has both object and PDB files
+meta.json contains sidecar info: {"toolchain":"test-compiler-1.0","ts":1791389874,"size":3072,"sidecars":[{"name":"test.pdb","type":"pdb","hash":"2fdb15a2090d37f625f21b5a5021fa5858798f0853cd96dbca74ee948f4f9c3d"}]}
+About to call cache.get...
+Calling cache.get...
+cache.get returned
+entry.has_value(): 1
+Assert passed
+entry->outputs.size(): 1
+Outputs assert passed
+entry->sidecars.size(): 1
+Sidecars assert passed
+entry->sidecars[0].type: 1
+Type assert passed
+entry->sidecars[0].relative_path.filename(): "test.pdb"
+Name assert passed

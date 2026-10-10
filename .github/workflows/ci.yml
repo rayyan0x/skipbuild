@@ -1,0 +1,56 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        build_type: [Release, Debug]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install OpenSSL (Linux)
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y libssl-dev
+    
+    - name: Install OpenSSL (macOS)
+      if: runner.os == 'macOS'
+      run: brew install openssl
+    
+    - name: Setup remake cache
+      uses: ./.github/action
+      with:
+        cache-key: ${{ runner.os }}-${{ matrix.build_type }}-${{ hashFiles('**/CMakeLists.txt', '**/*.cpp', '**/*.hpp', '**/*.h') }}
+    
+    - name: Configure
+      run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+    
+    - name: Build with remake
+      run: cmake --build build --config ${{ matrix.build_type }}
+      env:
+        REMAKE_CACHE_DIR: ${{ runner.temp }}/remake-cache
+    
+    - name: Test
+      run: ctest --test-dir build --output-on-failure -C ${{ matrix.build_type }}
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build Release
+      run: |
+        cmake -B build -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --config Release
+    - name: Package
+      run: |
+        tar -czf remake-linux.tar.gz -C build remake
+    - name: Upload Release Asset
+      uses: softprops/action-gh-release@v1
+      with:
+        files: remake-linux.tar.gz

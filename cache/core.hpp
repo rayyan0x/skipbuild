@@ -1,0 +1,424 @@
+#pragma once
+#include <string>
+#include <vector>
+#include <filesystem>
+#include <optional>
+#include <mutex>
+#include <map>
+#include <memory>
+#include <iostream>
+#include "config.hpp"
+#include "stats.hpp"
+
+namespace remake {
+
+// Cross-platform file locking for inter-process synchronization
+class FileLock {
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+public:
+    enum class LockType { Exclusive, Shared };
+    
+    explicit FileLock(const std::filesystem::path& lock_path);
+    ~FileLock();
+    
+    FileLock(const FileLock&) = delete;
+    FileLock& operator=(const FileLock&) = delete;
+    FileLock(FileLock&&) noexcept;
+    FileLock& operator=(FileLock&&) noexcept;
+    
+    // Acquire lock (blocks until acquired or timeout)
+    bool lock(LockType type = LockType::Exclusive, int timeout_ms = 5000);
+    
+    // Try to acquire lock (non-blocking)
+    bool try_lock(LockType type = LockType::Exclusive);
+    
+    // Release lock
+    void unlock();
+    
+    // Check if lock is held
+    bool is_locked() const;
+    
+    // RAII scoped lock
+    class ScopedLock {
+        FileLock& lock_;
+        bool acquired_;
+    public:
+        ScopedLock(FileLock& lock, LockType type = LockType::Exclusive, int timeout_ms = 10000) 
+            : lock_(lock), acquired_(lock.lock(type, timeout_ms)) {}
+        ~ScopedLock() { if (acquired_) lock_.unlock(); }
+        ScopedLock(const ScopedLock&) = delete;
+        ScopedLock& operator=(const ScopedLock&) = delete;
+        explicit operator bool() const { return acquired_; }
+    };
+};
+
+// Windows path utilities
+#ifdef _WIN32
+std::string to_long_path(const std::string& path);
+std::string from_long_path(const std::string& path);
+std::filesystem::path normalize_path(const std::filesystem::path& path);
+#else
+inline std::string to_long_path(const std::string& path) { return path; }
+inline std::string from_long_path(const std::string& path) { return path; }
+inline std::filesystem::path normalize_path(const std::filesystem::path& path) { return path; }
+#endif
+
+enum class CompilerType {
+    GCC,
+    Clang,
+    MSVC,
+    Unknown
+};
+
+struct CacheKey {
+    std::string hash;
+    std::string toolchain_id;
+};
+
+enum class SidecarType {
+    None,
+    PDB,           // MSVC .pdb
+    IDB,           // MSVC .idb
+    DWO,           // GCC/Clang Split DWARF .dwo
+    Other          // Other sidecar files
+};
+
+struct SidecarInfo {
+    SidecarType type = SidecarType::None;
+    std::filesystem::path relative_path;  // Relative path from cache entry directory
+    std::string hash;                      // SHA256 hash for validation
+    std::string original_path;             // Original absolute path where it should be restored
+};
+
+struct CacheEntry {
+    CacheKey key;
+    std::vector<std::filesystem::path> outputs;  // Primary outputs (.obj, .o)
+    std::vector<SidecarInfo> sidecars;           // Debug/sidecar files (.pdb, .dwo, etc.)
+    int64_t timestamp;
+    int64_t size_bytes;
+};
+
+enum class PCHMode {
+    None,           // Regular compilation
+    Create,         // Creating PCH: /Yc, -x c++-header
+    Use             // Using PCH: /Yu, -include
+};
+
+struct PCHInfo {
+    PCHMode mode = PCHMode::None;
+    std::filesystem::path pch_source;    // Source file for PCH (e.g., stdafx.h)
+    std::filesystem::path pch_output;    // Output PCH file (.pch, .gch)
+    std::string pch_hash;                // Hash of PCH content for validation
+};
+
+struct CompileCommand {
+    std::filesystem::path source;
+    std::filesystem::path output;
+    std::vector<std::string> args;
+    std::vector<std::string> includes;
+    std::vector<std::string> flags;
+    std::string compiler_path;
+    std::string compiler_hash;
+    PCHInfo pch;
+    
+    // Debug/sidecar file detection
+    bool has_debug_info = false;
+    std::vector<std::filesystem::path> expected_sidecars;  // Expected sidecar output paths
+    std::vector<SidecarType> expected_sidecar_types;       // Types of expected sidecars
+};
+
+enum class LinkerType {
+    GCC,        // g++, clang++
+    MSVC,       // link.exe
+    LLVM_LLD,   // lld-link, ld.lld
+    Unknown
+};
+
+struct LinkerCommand {
+    std::vector<std::string> args;
+    std::vector<std::filesystem::path> inputs;      // .o, .obj, .a, .lib files
+    std::vector<std::string> libraries;             // -lfoo, foo.lib
+    std::vector<std::string> library_dirs;          // -L, /LIBPATH:
+    std::filesystem::path output;                   // .exe, .dll, .so
+    std::string linker_path;
+    std::string linker_hash;
+    LinkerType type = LinkerType::Unknown;
+    std::vector<std::string> flags;                 // Other linker flags
+};
+
+class Cache {
+    std::filesystem::path root_;
+    mutable std::recursive_mutex mutex_;
+    CacheConfig config_;
+    mutable std::unique_ptr<StatsTracker> stats_tracker_;
+    
+    struct EntryMeta {
+        std::filesystem::path path;
+        int64_t timestamp;
+        int64_t size_bytes;
+        int64_t last_access;
+    };
+    
+    void update_access_time(const std::string& hash) const;
+    std::vector<EntryMeta> collect_entries() const;
+    void purge_corrupted_entry(const EntryMeta& entry) const;
+public:
+    explicit Cache(std::filesystem::path root, CacheConfig config = CacheConfig()) 
+        : root_(std::move(root)), config_(std::move(config)) {
+        stats_tracker_ = std::make_unique<StatsTracker>(root_);
+    }
+    
+    // Stats access
+    CacheStats get_detailed_stats() const {
+        return stats_tracker_->get_stats();
+    }
+    
+    void record_direct_execute() const {
+        stats_tracker_->record_direct_execute();
+    }
+    
+    void clear_stats() const {
+        stats_tracker_->clear();
+    }
+    
+    void print_stats() const {
+        stats_tracker_->print_summary();
+    }
+    
+    static CacheKey compute_key(const std::filesystem::path& source,
+                                 const std::vector<std::string>& includes,
+                                 const std::vector<std::string>& flags,
+                                 const std::string& compiler_hash,
+                                 CompilerType compiler_type = CompilerType::Unknown);
+    
+    static CacheKey compute_key_from_command(const CompileCommand& cmd);
+    
+    bool put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs,
+             const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars = {});
+    
+std::optional<CacheEntry> get(const CacheKey& key) const;
+    
+    // Safe cache get with automatic fallback on any error
+    // Returns nullopt on any error (corrupted entry, IO error, etc.) and logs warning
+    std::optional<CacheEntry> safe_get(const CacheKey& key) const;
+    
+    // Safe cache put - never throws, logs warning on failure, returns false on error
+    bool safe_put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs,
+                  const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars = {});
+
+    void prune(int64_t max_size_bytes = -1, int max_age_days = -1);
+    
+    struct Stats {
+        int64_t entries = 0;
+        int64_t total_size = 0;
+        int64_t hits = 0;
+        int64_t misses = 0;
+    };
+    Stats get_stats() const;
+    
+    const CacheConfig& get_config() const { return config_; }
+    void set_config(const CacheConfig& config) { config_ = config; }
+};
+
+struct CompilerInfo {
+    CompilerType type = CompilerType::Unknown;
+    std::string path;
+    std::string version_string;
+    std::string hash;
+};
+
+CompilerInfo detect_compiler(const std::string& compiler_path);
+std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]);
+std::string get_compiler_hash(const std::string& compiler_path);
+std::string get_compiler_hash_with_version(const std::string& compiler_path);
+std::vector<std::string> get_dependencies(char** argv, int argc);
+std::vector<std::string> canonicalize_flags(const std::vector<std::string>& flags, CompilerType type);
+
+// Path normalization for cache key determinism
+std::string normalize_path_for_key(const std::filesystem::path& path, const std::filesystem::path& build_root = "");
+std::filesystem::path find_build_root(const std::filesystem::path& source_file);
+
+// Environment variable handling for cache keys
+std::string get_relevant_env_hash();
+std::vector<std::string> get_relevant_env_vars();
+
+// PCH support
+PCHInfo detect_pch_mode(const CompileCommand& cmd, CompilerType type);
+std::string compute_pch_hash(const std::filesystem::path& pch_file);
+CacheKey compute_pch_key(const CompileCommand& cmd);
+
+// Linker support
+LinkerType detect_linker_type(const std::string& linker_path);
+std::optional<LinkerCommand> parse_linker_command(int argc, char* argv[]);
+std::string get_linker_hash(const std::string& linker_path);
+CacheKey compute_linker_key(const LinkerCommand& cmd);
+
+// Remote cache support (requires CURL)
+#if REMAKE_HAVE_CURL
+enum class RemoteCacheType {
+    None,
+    HTTP,       // Generic HTTP/REST (S3, GCS, Azure via presigned URLs)
+    LocalFS,    // NFS, shared filesystem
+    S3,         // S3-compatible (AWS S3, MinIO, etc.) with SigV4 auth
+    GCS,        // Google Cloud Storage
+    Azure,      // Azure Blob Storage
+};
+
+struct RemoteCacheConfig {
+    RemoteCacheType type = RemoteCacheType::None;
+    std::string endpoint;           // Base URL for HTTP, or path for LocalFS
+    std::string access_key;         // For S3/Azure
+    std::string secret_key;         // For S3/Azure
+    std::string region;             // For S3
+    std::string bucket;             // For S3/GCS
+    int timeout_seconds = 30;       // Legacy total timeout
+    int connect_timeout_ms = 3000;  // 3-second connect timeout (fail-fast)
+    int read_timeout_ms = 3000;     // 3-second read timeout (fail-fast)
+    int max_retries = 1;            // Minimal retries for fail-fast on 503/500
+    bool verify_ssl = true;
+    std::string auth_header;        // Custom auth header
+};
+
+// AWS SigV4 signer for S3-compatible storage
+class SigV4Signer {
+    std::string access_key_;
+    std::string secret_key_;
+    std::string region_;
+    std::string service_;
+    
+    std::string hmac_sha256(const std::string& key, const std::string& data) const;
+    std::string url_encode(const std::string& s, bool path = false) const;
+    std::string get_iso8601_time() const;
+    std::string get_date_stamp() const;
+    
+public:
+    SigV4Signer(std::string access_key, std::string secret_key, std::string region, std::string service = "s3")
+        : access_key_(std::move(access_key)), secret_key_(std::move(secret_key)), 
+          region_(std::move(region)), service_(std::move(service)) {}
+    
+    // Public utility methods
+    static std::string sha256_hex(const std::string& data);
+    
+    // Sign an HTTP request
+    std::map<std::string, std::string> sign_request(
+        const std::string& method,
+        const std::string& url,
+        const std::map<std::string, std::string>& headers,
+        const std::string& payload_hash = "UNSIGNED-PAYLOAD"
+    ) const;
+};
+
+class RemoteCache {
+    RemoteCacheConfig config_;
+    std::filesystem::path local_cache_;  // Local fallback cache
+    std::unique_ptr<SigV4Signer> signer_; // For S3-compatible
+    mutable std::mutex mutex_;            // For thread safety
+public:
+    explicit RemoteCache(RemoteCacheConfig config, std::filesystem::path local_cache);
+    
+    // Get entry from remote (falls back to local)
+    std::optional<CacheEntry> get(const CacheKey& key) const;
+    
+    // Put entry to remote (and local)
+    bool put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs);
+    
+    // Check if remote has key (HEAD request)
+    bool has(const CacheKey& key) const;
+    
+    // Delete from remote
+    bool remove(const CacheKey& key);
+    
+    // Stats
+    struct RemoteStats {
+        int64_t remote_hits = 0;
+        int64_t remote_misses = 0;
+        int64_t local_hits = 0;
+        int64_t local_misses = 0;
+        int64_t uploads = 0;
+        int64_t downloads = 0;
+        int64_t errors = 0;
+    };
+    RemoteStats get_stats() const;
+    
+    // Configure from environment
+    static RemoteCacheConfig from_env();
+};
+#endif // REMAKE_HAVE_CURL
+
+// Compression support (requires ZSTD)
+#if REMAKE_HAVE_ZSTD
+namespace remake {
+enum class CompressionAlgorithm {
+    ZSTD,
+    LZ4
+};
+
+struct CompressionConfig {
+    CompressionAlgorithm algorithm = CompressionAlgorithm::ZSTD;
+    int level = 3;  // ZSTD level 3 (fast, good ratio)
+};
+
+bool compress_buffer(const std::vector<uint8_t>& input, std::vector<uint8_t>& output, const CompressionConfig& config = {});
+bool decompress_buffer(const std::vector<uint8_t>& input, std::vector<uint8_t>& output, const CompressionConfig& config = {});
+bool compress_file(const std::filesystem::path& input_path, const std::filesystem::path& output_path, const CompressionConfig& config = {});
+bool decompress_file(const std::filesystem::path& input_path, const std::filesystem::path& output_path, const CompressionConfig& config = {});
+}
+#endif // REMAKE_HAVE_ZSTD
+
+// Resiliency & Fail-Safe Fallbacks
+struct FallbackResult {
+    int exit_code = -1;
+    std::string stdout_output;
+    std::string stderr_output;
+    bool fallback_used = false;
+    std::string error_message;
+};
+
+// Execute native compiler directly with full stdout/stderr passthrough
+FallbackResult execute_native_compiler(const std::vector<std::string>& args, const std::string& compiler_path = "");
+
+// Safe cache get with automatic fallback on any error
+template<typename CacheType>
+std::optional<typename CacheType::EntryType> safe_cache_get(CacheType& cache, const typename CacheType::KeyType& key, 
+                                                               const std::vector<std::string>& compiler_args,
+                                                               const std::string& compiler_path = "") {
+    try {
+        auto entry = cache.get(key);
+        if (entry) return entry;
+    } catch (const std::exception& e) {
+        std::cerr << "[build-cache warning] Cache read failed: " << e.what() << ". Falling back to native compilation.\n";
+        // Try to purge corrupted entry
+        try {
+            // Cache doesn't have direct purge by key, but get() already handles corruption
+        } catch (...) {}
+    } catch (...) {
+        std::cerr << "[build-cache warning] Cache read failed: unknown error. Falling back to native compilation.\n";
+    }
+    return std::nullopt;
+}
+
+// Safe cache put - never throws, logs warning on failure
+template<typename CacheType>
+bool safe_cache_put(CacheType& cache, const typename CacheType::KeyType& key,
+                    const std::vector<std::filesystem::path>& outputs,
+                    const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars = {}) {
+    try {
+        return cache.put(key, outputs, sidecars);
+    } catch (const std::exception& e) {
+        std::cerr << "[build-cache warning] Cache write failed: " << e.what() << ". Build output preserved.\n";
+        return false;
+    } catch (...) {
+        std::cerr << "[build-cache warning] Cache write failed: unknown error. Build output preserved.\n";
+        return false;
+    }
+}
+
+// Network timeout configuration
+struct NetworkTimeoutConfig {
+    int connect_timeout_ms = 3000;   // 3 seconds
+    int read_timeout_ms = 3000;      // 3 seconds
+    int max_retries = 1;             // Minimal retries for fail-fast
+};
+
+} // namespace remake

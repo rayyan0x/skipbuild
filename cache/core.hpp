@@ -99,6 +99,8 @@ struct CacheEntry {
     int64_t size_bytes;
 };
 
+#include "remote.hpp"
+
 enum class PCHMode {
     None,           // Regular compilation
     Create,         // Creating PCH: /Yc, -x c++-header
@@ -152,6 +154,7 @@ class Cache {
     mutable std::recursive_mutex mutex_;
     CacheConfig config_;
     mutable std::unique_ptr<StatsTracker> stats_tracker_;
+    mutable std::unique_ptr<RemoteCache> remote_cache_;
     
     struct EntryMeta {
         std::filesystem::path path;
@@ -167,6 +170,17 @@ public:
     explicit Cache(std::filesystem::path root, CacheConfig config = CacheConfig()) 
         : root_(std::move(root)), config_(std::move(config)) {
         stats_tracker_ = std::make_unique<StatsTracker>(root_);
+        
+        // Initialize remote cache if configured
+        if (!config_.remote_url.empty()) {
+            RemoteCache::Config remote_config = RemoteCache::from_env();
+            remote_config.url = config_.remote_url;
+            remote_config.read_only = config_.read_only;
+            remote_config.connect_timeout_ms = config_.remote_connect_timeout_ms;
+            remote_config.read_timeout_ms = config_.remote_read_timeout_ms;
+            remote_config.max_retries = config_.remote_max_retries;
+            remote_cache_ = std::make_unique<RemoteCache>(std::move(remote_config), root_);
+        }
     }
     
     // Stats access
@@ -219,6 +233,19 @@ std::optional<CacheEntry> get(const CacheKey& key) const;
     
     const CacheConfig& get_config() const { return config_; }
     void set_config(const CacheConfig& config) { config_ = config; }
+    
+    // Remote cache access
+    bool has_remote_cache() const { return remote_cache_ != nullptr; }
+    
+    RemoteCache::RemoteStats get_remote_stats() const {
+        if (remote_cache_) return remote_cache_->get_stats();
+        return RemoteCache::RemoteStats{};
+    }
+    
+    bool test_remote_connection() const {
+        if (remote_cache_) return remote_cache_->test_connection();
+        return false;
+    }
 };
 
 struct CompilerInfo {

@@ -17,6 +17,14 @@
 #include <memory>
 #include <cstdint>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <winhttp.h>
+#include <wincrypt.h>
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "crypt32.lib")
+#endif
+
 #if REMAKE_HAVE_CURL
 #include <curl/curl.h>
 #endif
@@ -27,6 +35,56 @@
 
 namespace fs = std::filesystem;
 namespace remake {
+
+// Helper functions for remote cache integration
+static bool read_file(const fs::path& path, std::vector<uint8_t>& data) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    std::streamsize size = f.tellg();
+    f.seekg(0, std::ios::beg);
+    data.resize(size);
+    f.read(reinterpret_cast<char*>(data.data()), size);
+    return f.good();
+}
+
+static bool write_file(const fs::path& path, const std::vector<uint8_t>& data) {
+    fs::create_directories(path.parent_path());
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return false;
+    f.write(reinterpret_cast<const char*>(data.data()), data.size());
+    return f.good();
+}
+
+static bool compress_data(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
+#if REMAKE_HAVE_ZSTD
+    size_t max_compressed = ZSTD_compressBound(input.size());
+    output.resize(max_compressed);
+    size_t compressed_size = ZSTD_compress(output.data(), output.size(), input.data(), input.size(), 3);
+    if (ZSTD_isError(compressed_size)) return false;
+    output.resize(compressed_size);
+    return true;
+#else
+    output = input;
+    return true;
+#endif
+}
+
+static bool decompress_data(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
+#if REMAKE_HAVE_ZSTD
+    size_t decompressed_size = ZSTD_getFrameContentSize(input.data(), input.size());
+    if (decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN || decompressed_size == ZSTD_CONTENTSIZE_ERROR) {
+        decompressed_size = input.size() * 10;
+    }
+    output.resize(decompressed_size);
+    size_t decompressed = ZSTD_decompress(output.data(), output.size(), input.data(), input.size());
+    if (ZSTD_isError(decompressed)) return false;
+    output.resize(decompressed);
+    return true;
+#else
+    output = input;
+    return true;
+#endif
+}
 
 #if REMAKE_HAVE_CURL
 // --- Remote Cache Support ---
@@ -72,12 +130,12 @@ static CURL* curl_init(const RemoteCacheConfig& config) {
 
 // HMAC-SHA256
 static std::string hmac_sha256(const std::string& key, const std::string& data) {
-    return remake::crypto::hmac_sha256_hex(key, data);
+    return crypto::hmac_sha256_hex(key, data);
 }
 
 // SHA256 hex
 static std::string sha256_hex(const std::string& data) {
-    return remake::crypto::sha256_hex(data);
+    return crypto::sha256_hex(data);
 }
 
 // URL encode
@@ -782,7 +840,11 @@ bool FileLock::is_locked() const { return impl_->is_locked(); }
 // --- Local Cache Implementation ---
 
 static std::string compute_sha256(const std::string& data) {
-    return remake::crypto::sha256_hex(data);
+    return crypto::sha256_hex(data);
+}
+
+static std::string compute_sha256(const std::vector<uint8_t>& data) {
+    return crypto::sha256_hex(data.data(), data.size());
 }
 
 // Atomic file replacement using MoveFileExW on Windows
@@ -1046,7 +1108,7 @@ CacheKey Cache::compute_key_from_command(const CompileCommand& cmd) {
     std::sort(norm_flags.begin(), norm_flags.end());
     
     return compute_key(cmd.source, norm_includes, norm_flags, cmd.compiler_hash, 
-                       remake::detect_compiler(cmd.compiler_path).type);
+                       detect_compiler(cmd.compiler_path).type);
 }
 
 // Generate unique temporary file path
@@ -1189,10 +1251,11 @@ bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& o
 }
 
 std::optional<CacheEntry> Cache::safe_get(const CacheKey& key) const {
+    // First try local cache
+    std::optional<CacheEntry> local_entry;
     try {
-        auto entry = get(key);
-        if (entry) return entry;
-        return std::nullopt;
+        local_entry = get(key);
+        if (local_entry) return local_entry;
     } catch (const std::filesystem::filesystem_error& e) {
         std::cerr << "[build-cache warning] Cache read failed: " << e.what() << ". Falling back to native compilation.\n";
         try {
@@ -1215,24 +1278,132 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key) const {
             std::filesystem::remove_all(key_dir, ec);
         } catch (...) {}
     }
+    
+    // Local miss - try remote cache
+    if (remote_cache_) {
+        try {
+            auto remote_result = remote_cache_->get(key.hash, key.toolchain_id);
+            if (remote_result.success && !remote_result.primary_data.empty()) {
+                // Create local cache directory for this key
+                fs::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+                fs::create_directories(key_dir);
+                
+                // Decompress primary artifact
+                std::vector<uint8_t> primary_decompressed;
+                if (!decompress_data(remote_result.primary_data, primary_decompressed)) {
+                    std::cerr << "[build-cache warning] Failed to decompress primary artifact from remote cache.\n";
+                } else {
+                    // Save primary artifact
+                    fs::path primary_path = key_dir / (key.hash + ".obj");
+                    if (write_file(primary_path, primary_decompressed)) {
+                        // Create CacheEntry
+                        CacheEntry entry;
+                        entry.key = key;
+                        entry.timestamp = std::time(nullptr);
+                        entry.size_bytes = primary_decompressed.size();
+                        entry.outputs.push_back(primary_path);
+                        
+                        // Decompress and save sidecars
+                        for (const auto& [name, compressed_data] : remote_result.sidecars) {
+                            std::vector<uint8_t> decompressed;
+                            if (decompress_data(compressed_data, decompressed)) {
+                                fs::path sidecar_path = key_dir / name;
+                                if (write_file(sidecar_path, decompressed)) {
+                                    SidecarInfo si;
+                                    si.relative_path = sidecar_path.filename();
+                                    si.hash = compute_sha256(decompressed);
+                                    
+                                    // Determine sidecar type from extension
+                                    std::string ext = name;
+                                    if (ext.size() > 4 && ext.substr(ext.size() - 4) == ".zst") {
+                                        ext = ext.substr(0, ext.size() - 4);
+                                    }
+                                    if (ext.size() > 4 && (ext.substr(ext.size() - 4) == ".pdb" || ext.substr(ext.size() - 4) == ".idb")) {
+                                        si.type = (ext.substr(ext.size() - 4) == ".pdb") ? SidecarType::PDB : SidecarType::IDB;
+                                    } else if (ext.size() > 4 && ext.substr(ext.size() - 4) == ".dwo") {
+                                        si.type = SidecarType::DWO;
+                                    } else {
+                                        si.type = SidecarType::Other;
+                                    }
+                                    
+                                    entry.sidecars.push_back(std::move(si));
+                                    entry.size_bytes += decompressed.size();
+                                }
+                            }
+                        }
+                        
+                        return entry;
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[build-cache warning] Remote cache read failed: " << e.what() << ". Falling back to native compilation.\n";
+        } catch (...) {
+            std::cerr << "[build-cache warning] Remote cache read failed: unknown error. Falling back to native compilation.\n";
+        }
+    }
+    
     stats_tracker_->record_miss();
     return std::nullopt;
 }
 
 bool Cache::safe_put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs,
                      const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars) {
+    bool local_ok = false;
     try {
-        return put(key, outputs, sidecars);
+        local_ok = put(key, outputs, sidecars);
     } catch (const std::filesystem::filesystem_error& e) {
         std::cerr << "[build-cache warning] Cache write failed: " << e.what() << ". Build output preserved.\n";
-        return false;
     } catch (const std::exception& e) {
         std::cerr << "[build-cache warning] Cache write failed: " << e.what() << ". Build output preserved.\n";
-        return false;
     } catch (...) {
         std::cerr << "[build-cache warning] Cache write failed: unknown error. Build output preserved.\n";
-        return false;
     }
+    
+    // Also upload to remote cache if configured and not read-only
+    if (remote_cache_ && !config_.read_only) {
+        try {
+            // Compress primary outputs
+            std::vector<uint8_t> primary_data;
+            for (const auto& output : outputs) {
+                if (!fs::exists(output)) continue;
+                std::vector<uint8_t> file_data;
+                if (!read_file(output, file_data)) continue;
+                
+                std::vector<uint8_t> compressed;
+                if (compress_data(file_data, compressed)) {
+                    primary_data = std::move(compressed);
+                    break; // Use first valid output
+                }
+            }
+            
+            // Compress sidecars
+            std::vector<std::pair<std::string, std::vector<uint8_t>>> compressed_sidecars;
+            for (const auto& [path, type] : sidecars) {
+                if (!fs::exists(path)) continue;
+                std::vector<uint8_t> file_data;
+                if (!read_file(path, file_data)) continue;
+                
+                std::vector<uint8_t> compressed;
+                if (compress_data(file_data, compressed)) {
+                    // Determine remote filename
+                    std::string ext = path.extension().string();
+                    std::string remote_name = key.hash + ext + ".zst";
+                    compressed_sidecars.emplace_back(remote_name, std::move(compressed));
+                }
+            }
+            
+            if (!primary_data.empty() || !compressed_sidecars.empty()) {
+                remote_cache_->put(key.hash, key.toolchain_id, primary_data, compressed_sidecars);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[build-cache warning] Remote cache write failed: " << e.what() << ". Build output preserved locally.\n";
+        } catch (...) {
+            std::cerr << "[build-cache warning] Remote cache write failed: unknown error. Build output preserved locally.\n";
+        }
+    }
+    
+    return local_ok;
 }
 
 std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
@@ -2012,6 +2183,791 @@ FallbackResult execute_native_compiler(const std::vector<std::string>& args, con
     }
     
     return result;
+}
+
+// ============================================================================
+// RemoteCache Implementation (WinHTTP-based, zero-dependency)
+// ============================================================================
+
+// RAII wrapper for WinHTTP handles
+struct WinHttpHandle {
+    HINTERNET handle = nullptr;
+    WinHttpHandle() = default;
+    explicit WinHttpHandle(HINTERNET h) : handle(h) {}
+    ~WinHttpHandle() { if (handle) WinHttpCloseHandle(handle); }
+    WinHttpHandle(WinHttpHandle&& other) noexcept : handle(other.handle) { other.handle = nullptr; }
+    WinHttpHandle& operator=(WinHttpHandle&& other) noexcept {
+        if (handle) WinHttpCloseHandle(handle);
+        handle = other.handle;
+        other.handle = nullptr;
+        return *this;
+    }
+    WinHttpHandle(const WinHttpHandle&) = delete;
+    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
+    explicit operator bool() const { return handle != nullptr; }
+    operator HINTERNET() const { return handle; }
+};
+
+// Helper to convert string to wide string
+static std::wstring to_wide(const std::string& s) {
+    if (s.empty()) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(len, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
+    if (!w.empty() && w.back() == L'\0') w.pop_back();
+    return w;
+}
+
+// URL parsing helper
+struct ParsedUrl {
+    std::string scheme;
+    std::string host;
+    std::string port;
+    std::string path;
+    bool is_ssl = false;
+    int default_port = 80;
+};
+
+static std::optional<ParsedUrl> parse_url(const std::string& url) {
+    ParsedUrl result;
+    std::string u = url;
+    
+    size_t scheme_end = u.find("://");
+    if (scheme_end == std::string::npos) return std::nullopt;
+    result.scheme = u.substr(0, scheme_end);
+    result.is_ssl = (result.scheme == "https");
+    result.default_port = result.is_ssl ? 443 : 80;
+    u = u.substr(scheme_end + 3);
+    
+    size_t path_start = u.find('/');
+    std::string host_port = (path_start == std::string::npos) ? u : u.substr(0, path_start);
+    result.path = (path_start == std::string::npos) ? "/" : u.substr(path_start);
+    
+    size_t colon = host_port.find(':');
+    if (colon == std::string::npos) {
+        result.host = host_port;
+        result.port = std::to_string(result.default_port);
+    } else {
+        result.host = host_port.substr(0, colon);
+        result.port = host_port.substr(colon + 1);
+    }
+    
+    return result;
+}
+
+// Build the full object URL for a cache key
+static std::string build_object_url(const RemoteCache::Config& config, const std::string& key_hash, const std::string& toolchain_id) {
+    std::string base = config.url;
+    if (!base.empty() && base.back() != '/') base += '/';
+    std::string toolchain_prefix = toolchain_id.substr(0, 8);
+    std::string hash_prefix1 = key_hash.substr(0, 2);
+    std::string hash_prefix2 = key_hash.substr(2, 2);
+    return base + toolchain_prefix + '/' + hash_prefix1 + '/' + hash_prefix2 + '/' + key_hash;
+}
+
+// Simple SHA256 using Windows CryptoAPI
+static std::string compute_sha256_winhttp(const std::vector<uint8_t>& data) {
+    HCRYPTPROV hProv = 0;
+    HCRYPTHASH hHash = 0;
+    std::string result;
+    
+    if (CryptAcquireContext(&hProv, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
+            if (CryptHashData(hHash, data.data(), static_cast<DWORD>(data.size()), 0)) {
+                DWORD hash_len = 32;
+                std::vector<BYTE> hash(hash_len);
+                if (CryptGetHashParam(hHash, HP_HASHVAL, hash.data(), &hash_len, 0)) {
+                    std::ostringstream oss;
+                    for (BYTE b : hash) {
+                        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+                    }
+                    result = oss.str();
+                }
+            }
+            CryptDestroyHash(hHash);
+        }
+        CryptReleaseContext(hProv, 0);
+    }
+    return result;
+}
+
+// WinHTTP client
+struct HttpResponse {
+    int status_code = 0;
+    std::vector<uint8_t> body;
+    std::string error;
+};
+
+class WinHttpClient {
+    WinHttpHandle session_;
+    std::wstring user_agent_ = L"remake/0.1.0";
+    int connect_timeout_ms_ = 3000;
+    int read_timeout_ms_ = 3000;
+    bool verify_ssl_ = true;
+    std::string auth_header_;
+    
+public:
+    WinHttpClient(int connect_timeout_ms, int read_timeout_ms, bool verify_ssl, const std::string& auth_header)
+        : connect_timeout_ms_(connect_timeout_ms), read_timeout_ms_(read_timeout_ms),
+          verify_ssl_(verify_ssl), auth_header_(auth_header) {
+        session_.handle = WinHttpOpen(user_agent_.c_str(), 
+                                       WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                       WINHTTP_NO_PROXY_NAME,
+                                       WINHTTP_NO_PROXY_BYPASS,
+                                       0);
+    }
+    
+    bool is_valid() const { return static_cast<bool>(session_); }
+    
+    void set_timeouts(int connect_ms, int read_ms) {
+        connect_timeout_ms_ = connect_ms;
+        read_timeout_ms_ = read_ms;
+        if (session_) {
+            WinHttpSetTimeouts(session_, 0, connect_timeout_ms_, read_timeout_ms_, 0);
+        }
+    }
+    
+    HttpResponse request(const ParsedUrl& url, const std::string& method,
+                         const std::vector<uint8_t>* body = nullptr,
+                         const std::string& content_type = "") {
+        HttpResponse response;
+        
+        if (!session_) {
+            response.error = "WinHTTP session not initialized";
+            return response;
+        }
+        
+        WinHttpHandle connect(WinHttpConnect(session_, to_wide(url.host).c_str(),
+                                              static_cast<INTERNET_PORT>(std::stoi(url.port)), 0));
+        if (!connect) {
+            response.error = "WinHttpConnect failed: " + std::to_string(GetLastError());
+            return response;
+        }
+        
+        WinHttpSetTimeouts(session_, 0, connect_timeout_ms_, read_timeout_ms_, 0);
+        
+        DWORD flags = url.is_ssl ? WINHTTP_FLAG_SECURE : 0;
+        WinHttpHandle request(WinHttpOpenRequest(connect, to_wide(method).c_str(),
+                                                  to_wide(url.path).c_str(),
+                                                  nullptr, WINHTTP_NO_REFERER,
+                                                  WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                                  flags));
+        if (!request) {
+            response.error = "WinHttpOpenRequest failed: " + std::to_string(GetLastError());
+            return response;
+        }
+        
+        if (url.is_ssl && !verify_ssl_) {
+#ifndef SECURITY_FLAG_IGNORE_REVOCATION
+            #define SECURITY_FLAG_IGNORE_REVOCATION 0x00000080
+#endif
+            DWORD sec_flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA | 
+                              SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                              SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                              SECURITY_FLAG_IGNORE_REVOCATION;
+            WinHttpSetOption(request, WINHTTP_OPTION_SECURITY_FLAGS, &sec_flags, sizeof(sec_flags));
+        }
+        
+        if (!auth_header_.empty()) {
+            std::wstring wauth = to_wide(auth_header_);
+            WinHttpAddRequestHeaders(request, wauth.c_str(), -1, WINHTTP_ADDREQ_FLAG_ADD);
+        }
+        
+        if (!content_type.empty()) {
+            std::wstring wct = to_wide("Content-Type: " + content_type);
+            WinHttpAddRequestHeaders(request, wct.c_str(), -1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+        }
+        
+        const char* body_ptr = body ? reinterpret_cast<const char*>(body->data()) : nullptr;
+        DWORD body_len = body ? static_cast<DWORD>(body->size()) : 0;
+        
+        if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                const_cast<char*>(body_ptr), body_len, body_len, 0)) {
+            response.error = "WinHttpSendRequest failed: " + std::to_string(GetLastError());
+            return response;
+        }
+        
+        if (!WinHttpReceiveResponse(request, nullptr)) {
+            response.error = "WinHttpReceiveResponse failed: " + std::to_string(GetLastError());
+            return response;
+        }
+        
+        DWORD status_code = 0;
+        DWORD status_size = sizeof(status_code);
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_size, WINHTTP_NO_HEADER_INDEX);
+        response.status_code = static_cast<int>(status_code);
+        
+        std::vector<uint8_t> buffer;
+        DWORD bytes_available = 0;
+        do {
+            bytes_available = 0;
+            if (!WinHttpQueryDataAvailable(request, &bytes_available)) break;
+            if (bytes_available == 0) break;
+            
+            size_t offset = buffer.size();
+            buffer.resize(offset + bytes_available);
+            DWORD bytes_read = 0;
+            if (!WinHttpReadData(request, buffer.data() + offset, bytes_available, &bytes_read)) {
+                buffer.resize(offset);
+                break;
+            }
+            if (bytes_read < bytes_available) {
+                buffer.resize(offset + bytes_read);
+            }
+        } while (bytes_available > 0);
+        
+        response.body = std::move(buffer);
+        return response;
+    }
+    
+    bool head(const ParsedUrl& url, int& status_code, std::string& error) {
+        auto response = request(url, "HEAD");
+        status_code = response.status_code;
+        error = response.error;
+        return status_code >= 200 && status_code < 300;
+    }
+    
+    HttpResponse get(const ParsedUrl& url) {
+        return request(url, "GET");
+    }
+    
+    HttpResponse put(const ParsedUrl& url, const std::vector<uint8_t>& body, const std::string& content_type) {
+        return request(url, "PUT", &body, content_type);
+    }
+};
+
+#ifndef _WIN32
+// POSIX socket HTTP client for Linux/macOS
+class PosixHttpClient {
+    int socket_fd_ = -1;
+    std::string user_agent_ = "remake/0.1.0";
+    int connect_timeout_ms_ = 3000;
+    int read_timeout_ms_ = 3000;
+    bool verify_ssl_ = true;  // Not used for POSIX (no SSL support in raw sockets)
+    std::string auth_header_;
+    std::string host_;
+    std::string port_;
+    bool is_ssl_ = false;
+    
+    // Helper to set socket timeouts
+    void set_socket_timeouts(int fd, int connect_ms, int read_ms) {
+        struct timeval tv_connect, tv_read;
+        tv_connect.tv_sec = connect_ms / 1000;
+        tv_connect.tv_usec = (connect_ms % 1000) * 1000;
+        tv_read.tv_sec = read_ms / 1000;
+        tv_read.tv_usec = (read_ms % 1000) * 1000;
+        
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv_connect, sizeof(tv_connect));
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv_read, sizeof(tv_read));
+    }
+    
+    // Connect to host:port
+    bool connect_to_host(const std::string& host, const std::string& port, bool is_ssl) {
+        (void)is_ssl; // SSL not supported in raw POSIX sockets
+        
+        struct addrinfo hints = {}, *res = nullptr;
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        
+        if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0) {
+            return false;
+        }
+        
+        for (struct addrinfo* rp = res; rp != nullptr; rp = rp->ai_next) {
+            socket_fd_ = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (socket_fd_ == -1) continue;
+            
+            set_socket_timeouts(socket_fd_, connect_timeout_ms_, read_timeout_ms_);
+            
+            if (connect(socket_fd_, rp->ai_addr, rp->ai_addrlen) == 0) {
+                freeaddrinfo(res);
+                return true;
+            }
+            
+            close(socket_fd_);
+            socket_fd_ = -1;
+        }
+        
+        freeaddrinfo(res);
+        return false;
+    }
+    
+    // Send all data
+    bool send_all(const void* data, size_t len) {
+        const char* ptr = static_cast<const char*>(data);
+        while (len > 0) {
+            ssize_t sent = send(socket_fd_, ptr, len, 0);
+            if (sent <= 0) return false;
+            ptr += sent;
+            len -= sent;
+        }
+        return true;
+    }
+    
+    // Receive data until connection closes or timeout
+    std::vector<uint8_t> receive_all() {
+        std::vector<uint8_t> buffer;
+        char temp[4096];
+        
+        while (true) {
+            ssize_t received = recv(socket_fd_, temp, sizeof(temp), 0);
+            if (received <= 0) break;
+            buffer.insert(buffer.end(), temp, temp + received);
+        }
+        return buffer;
+    }
+    
+    // Parse HTTP response
+    HttpResponse parse_response(const std::vector<uint8_t>& raw_response) {
+        HttpResponse response;
+        
+        // Find end of headers
+        std::string raw(raw_response.begin(), raw_response.end());
+        size_t header_end = raw.find("\r\n\r\n");
+        if (header_end == std::string::npos) {
+            response.error = "Invalid HTTP response: no header terminator";
+            return response;
+        }
+        
+        std::string headers = raw.substr(0, header_end);
+        std::string body = raw.substr(header_end + 4);
+        
+        // Parse status line
+        size_t status_start = headers.find("HTTP/");
+        if (status_start == std::string::npos) {
+            response.error = "Invalid HTTP response: no status line";
+            return response;
+        }
+        
+        size_t status_code_start = headers.find(' ', status_start);
+        if (status_code_start != std::string::npos) {
+            size_t status_code_end = headers.find(' ', status_code_start + 1);
+            if (status_code_end != std::string::npos) {
+                std::string status_str = headers.substr(status_code_start + 1, status_code_end - status_code_start - 1);
+                try {
+                    response.status_code = std::stoi(status_str);
+                } catch (...) {
+                    response.status_code = 0;
+                }
+            }
+        }
+        
+        response.body.assign(body.begin(), body.end());
+        return response;
+    }
+    
+public:
+    PosixHttpClient(int connect_timeout_ms, int read_timeout_ms, bool verify_ssl, const std::string& auth_header)
+        : connect_timeout_ms_(connect_timeout_ms), read_timeout_ms_(read_timeout_ms),
+          verify_ssl_(verify_ssl), auth_header_(auth_header) {}
+    
+    ~PosixHttpClient() {
+        if (socket_fd_ != -1) {
+            close(socket_fd_);
+        }
+    }
+    
+    bool is_valid() const { return true; }  // Always valid on POSIX
+    
+    void set_timeouts(int connect_ms, int read_ms) {
+        connect_timeout_ms_ = connect_ms;
+        read_timeout_ms_ = read_ms;
+    }
+    
+    HttpResponse request(const ParsedUrl& url, const std::string& method,
+                         const std::vector<uint8_t>* body = nullptr,
+                         const std::string& content_type = "") {
+        HttpResponse response;
+        
+        // Store host/port for reconnection
+        host_ = url.host;
+        port_ = url.port;
+        is_ssl_ = url.is_ssl;
+        
+        // Connect to host
+        if (!connect_to_host(url.host, url.port, url.is_ssl)) {
+            response.error = "Failed to connect to " + url.host + ":" + url.port;
+            return response;
+        }
+        
+        // Build HTTP request
+        std::ostringstream request_stream;
+        request_stream << method << " " << url.path << " HTTP/1.1\r\n";
+        request_stream << "Host: " << url.host;
+        if (url.port != "80" && url.port != "443") {
+            request_stream << ":" << url.port;
+        }
+        request_stream << "\r\n";
+        request_stream << "User-Agent: " << user_agent_ << "\r\n";
+        request_stream << "Connection: close\r\n";
+        
+        if (!auth_header_.empty()) {
+            request_stream << auth_header_ << "\r\n";
+        }
+        
+        if (!content_type.empty()) {
+            request_stream << "Content-Type: " << content_type << "\r\n";
+        }
+        
+        if (body && !body->empty()) {
+            request_stream << "Content-Length: " << body->size() << "\r\n";
+        }
+        
+        request_stream << "\r\n";
+        
+        std::string request_str = request_stream.str();
+        
+        // Send request
+        if (!send_all(request_str.c_str(), request_str.size())) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+            response.error = "Failed to send request";
+            return response;
+        }
+        
+        // Send body if present
+        if (body && !body->empty()) {
+            if (!send_all(body->data(), body->size())) {
+                close(socket_fd_);
+                socket_fd_ = -1;
+                response.error = "Failed to send body";
+                return response;
+            }
+        }
+        
+        // Receive response
+        std::vector<uint8_t> raw_response = receive_all();
+        close(socket_fd_);
+        socket_fd_ = -1;
+        
+        if (raw_response.empty()) {
+            response.error = "Empty response from server";
+            return response;
+        }
+        
+        return parse_response(raw_response);
+    }
+    
+    bool head(const ParsedUrl& url, int& status_code, std::string& error) {
+        auto response = request(url, "HEAD");
+        status_code = response.status_code;
+        error = response.error;
+        return status_code >= 200 && status_code < 300;
+    }
+    
+    HttpResponse get(const ParsedUrl& url) {
+        return request(url, "GET");
+    }
+    
+    HttpResponse put(const ParsedUrl& url, const std::vector<uint8_t>& body, const std::string& content_type) {
+        return request(url, "PUT", &body, content_type);
+    }
+};
+#endif  // _WIN32
+
+// RemoteCache::Impl implementation
+struct RemoteCache::Impl {
+    Config config_;
+    fs::path local_cache_;
+    mutable RemoteStats stats_;
+    mutable std::mutex stats_mutex_;
+    
+#ifdef _WIN32
+    std::unique_ptr<WinHttpClient> client_;
+#else
+    std::unique_ptr<PosixHttpClient> client_;
+#endif
+    std::optional<ParsedUrl> parsed_base_url_;
+    
+    Impl(Config config, fs::path local_cache)
+        : config_(std::move(config)), local_cache_(std::move(local_cache)) {
+#ifdef _WIN32
+        client_ = std::make_unique<WinHttpClient>(
+            config_.connect_timeout_ms,
+            config_.read_timeout_ms,
+            config_.verify_ssl,
+            config_.auth_header
+        );
+#else
+        client_ = std::make_unique<PosixHttpClient>(
+            config_.connect_timeout_ms,
+            config_.read_timeout_ms,
+            config_.verify_ssl,
+            config_.auth_header
+        );
+#endif
+        
+        if (client_ && client_->is_valid()) {
+            parsed_base_url_ = parse_url(config_.url);
+        }
+    }
+    
+    bool is_configured() const {
+        return client_ && client_->is_valid() && parsed_base_url_.has_value();
+    }
+    
+    void increment_stat(int64_t& stat) const {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        ++stat;
+    }
+    
+    RemoteStats get_stats() const {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        return stats_;
+    }
+    
+    template<typename Func>
+    auto with_retries(Func&& func) -> decltype(func()) {
+        using ResultType = decltype(func());
+        std::string last_error;
+        
+        for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
+            auto result = func();
+            if (!result.error.empty()) {
+                last_error = result.error;
+                if (attempt < config_.max_retries) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+                    continue;
+                }
+            }
+            return result;
+        }
+        
+        ResultType error_result;
+        error_result.error = "Max retries exceeded: " + last_error;
+        return error_result;
+    }
+};
+
+RemoteCache::RemoteCache(Config config, fs::path local_cache)
+    : impl_(std::make_unique<Impl>(std::move(config), std::move(local_cache))) {}
+
+RemoteCache::~RemoteCache() = default;
+
+RemoteCache::RemoteCache(RemoteCache&& other) noexcept = default;
+RemoteCache& RemoteCache::operator=(RemoteCache&& other) noexcept = default;
+
+bool RemoteCache::has(const std::string& key_hash) const {
+    if (!impl_->is_configured()) return false;
+    
+    std::string toolchain_id = "unknown";
+    std::string object_url = build_object_url(impl_->config_, key_hash, toolchain_id) + "/meta.json";
+    auto url_opt = parse_url(object_url);
+    if (!url_opt) return false;
+    
+    int status_code = 0;
+    std::string error;
+    bool exists = false;
+    
+    for (int attempt = 0; attempt <= impl_->config_.max_retries; ++attempt) {
+        exists = impl_->client_->head(*url_opt, status_code, error);
+        if (error.empty()) {
+            break;
+        }
+        if (attempt < impl_->config_.max_retries) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+        }
+    }
+    
+    if (!error.empty()) {
+        impl_->increment_stat(impl_->stats_.errors);
+    }
+    
+    return exists;
+}
+
+RemoteCache::GetResult RemoteCache::get(const std::string& key_hash, const std::string& toolchain_id) const {
+    GetResult result;
+    
+    if (!impl_->is_configured()) {
+        result.error = "Remote cache not configured";
+        return result;
+    }
+    
+    std::string base_url = build_object_url(impl_->config_, key_hash, toolchain_id);
+    auto base_url_opt = parse_url(base_url);
+    if (!base_url_opt) {
+        result.error = "Invalid URL";
+        return result;
+    }
+    
+    std::string meta_url = base_url + "/meta.json";
+    auto meta_url_opt = parse_url(meta_url);
+    if (!meta_url_opt) {
+        result.error = "Invalid meta URL";
+        return result;
+    }
+    
+    auto meta_response = impl_->with_retries([&]() {
+        return impl_->client_->get(*meta_url_opt);
+    });
+    
+    if (!meta_response.error.empty() || meta_response.status_code < 200 || meta_response.status_code >= 300) {
+        impl_->increment_stat(impl_->stats_.remote_misses);
+        impl_->increment_stat(impl_->stats_.errors);
+        result.error = "Meta not found: " + meta_response.error;
+        return result;
+    }
+    
+    std::string primary_name = key_hash + ".zst";
+    std::string file_url = base_url + "/" + primary_name;
+    auto file_url_opt = parse_url(file_url);
+    if (!file_url_opt) {
+        result.error = "Invalid file URL";
+        return result;
+    }
+    
+    auto file_response = impl_->with_retries([&]() {
+        return impl_->client_->get(*file_url_opt);
+    });
+    
+    if (!file_response.error.empty() || file_response.status_code < 200 || file_response.status_code >= 300) {
+        impl_->increment_stat(impl_->stats_.remote_misses);
+        result.error = "Primary artifact not found: " + file_response.error;
+        return result;
+    }
+    
+    result.primary_data = std::move(file_response.body);
+    
+    std::vector<std::string> sidecar_names = {".pdb", ".idb", ".dwo"};
+    for (const auto& ext : sidecar_names) {
+        std::string name = key_hash + ext + ".zst";
+        std::string sc_url = base_url + "/" + name;
+        auto sc_url_opt = parse_url(sc_url);
+        if (!sc_url_opt) continue;
+        
+        auto sc_response = impl_->with_retries([&]() {
+            return impl_->client_->get(*sc_url_opt);
+        });
+        
+        if (!sc_response.error.empty() || sc_response.status_code < 200 || sc_response.status_code >= 300) {
+            continue;
+        }
+        
+        result.sidecars.emplace_back(name, std::move(sc_response.body));
+    }
+    
+    impl_->increment_stat(impl_->stats_.remote_hits);
+    impl_->increment_stat(impl_->stats_.downloads);
+    result.success = true;
+    return result;
+}
+
+bool RemoteCache::put(const std::string& key_hash, const std::string& toolchain_id,
+                      const std::vector<uint8_t>& primary_data,
+                      const std::vector<std::pair<std::string, std::vector<uint8_t>>>& sidecars) {
+    if (!impl_->is_configured() || impl_->config_.read_only) return false;
+    
+    std::string base_url = build_object_url(impl_->config_, key_hash, toolchain_id);
+    auto base_url_opt = parse_url(base_url);
+    if (!base_url_opt) return false;
+    
+    bool any_uploaded = false;
+    
+    std::string primary_name = key_hash + ".zst";
+    std::string file_url = base_url + "/" + primary_name;
+    auto file_url_opt = parse_url(file_url);
+    if (!file_url_opt) return false;
+    
+    auto put_response = impl_->with_retries([&]() {
+        return impl_->client_->put(*file_url_opt, primary_data, "application/octet-stream");
+    });
+    
+    if (!put_response.error.empty() || put_response.status_code < 200 || put_response.status_code >= 300) {
+        impl_->increment_stat(impl_->stats_.errors);
+    } else {
+        any_uploaded = true;
+    }
+    
+    for (const auto& [name, data] : sidecars) {
+        std::string sc_url = base_url + "/" + name;
+        auto sc_url_opt = parse_url(sc_url);
+        if (!sc_url_opt) continue;
+        
+        auto sc_response = impl_->with_retries([&]() {
+            return impl_->client_->put(*sc_url_opt, data, "application/octet-stream");
+        });
+        
+        if (!sc_response.error.empty() || sc_response.status_code < 200 || sc_response.status_code >= 300) {
+            impl_->increment_stat(impl_->stats_.errors);
+        } else {
+            any_uploaded = true;
+        }
+    }
+    
+    if (any_uploaded) {
+        std::string meta_json = "{\"toolchain\":\"" + toolchain_id + "\",\"ts\":" + std::to_string(std::time(nullptr)) + ",\"compressed\":true}";
+        std::vector<uint8_t> meta_data(meta_json.begin(), meta_json.end());
+        
+        std::string meta_url = base_url + "/meta.json";
+        auto meta_url_opt = parse_url(meta_url);
+        if (meta_url_opt) {
+            auto meta_response = impl_->with_retries([&]() {
+                return impl_->client_->put(*meta_url_opt, meta_data, "application/json");
+            });
+            
+            if (!meta_response.error.empty() || meta_response.status_code < 200 || meta_response.status_code >= 300) {
+                impl_->increment_stat(impl_->stats_.errors);
+            }
+        }
+        
+        impl_->increment_stat(impl_->stats_.uploads);
+    }
+    
+    return any_uploaded;
+}
+
+RemoteCache::RemoteStats RemoteCache::get_stats() const {
+    return impl_->get_stats();
+}
+
+RemoteCache::Config RemoteCache::from_env() {
+    Config config;
+    
+    if (const char* env = std::getenv("BUILDCACHE_REMOTE_URL")) {
+        config.url = env;
+    }
+    
+    if (const char* env = std::getenv("BUILDCACHE_REMOTE_READ_ONLY")) {
+        std::string v = env;
+        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        config.read_only = (v == "1" || v == "true" || v == "yes" || v == "on");
+    }
+    
+    if (const char* env = std::getenv("BUILDCACHE_REMOTE_CONNECT_TIMEOUT")) {
+        try { config.connect_timeout_ms = std::stoi(env); } catch (...) {}
+    }
+    
+    if (const char* env = std::getenv("BUILDCACHE_REMOTE_READ_TIMEOUT")) {
+        try { config.read_timeout_ms = std::stoi(env); } catch (...) {}
+    }
+    
+    if (const char* env = std::getenv("BUILDCACHE_REMOTE_MAX_RETRIES")) {
+        try { config.max_retries = std::stoi(env); } catch (...) {}
+    }
+    
+    if (const char* env = std::getenv("BUILDCACHE_REMOTE_AUTH_HEADER")) {
+        config.auth_header = env;
+    }
+    
+    if (const char* env = std::getenv("BUILDCACHE_REMOTE_VERIFY_SSL")) {
+        std::string v = env;
+        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        config.verify_ssl = (v == "1" || v == "true" || v == "yes" || v == "on");
+    }
+    
+    return config;
+}
+
+bool RemoteCache::test_connection() const {
+    if (!impl_->is_configured()) return false;
+    
+    if (!impl_->parsed_base_url_) return false;
+    
+    int status_code = 0;
+    std::string error;
+    return impl_->client_->head(*impl_->parsed_base_url_, status_code, error);
 }
 
 } // namespace remake

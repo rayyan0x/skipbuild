@@ -9,6 +9,7 @@
 #include <array>
 #include <sstream>
 #include <algorithm>
+#include <iomanip>
 
 namespace fs = std::filesystem;
 
@@ -43,18 +44,27 @@ void print_usage(const char* prog) {
     std::cerr << "  remake g++ -c foo.cpp -o foo.o     # Wrap compiler (like ccache)\n";
     std::cerr << "  remake --cache-dir <path>          # Set cache directory\n";
     std::cerr << "  remake --stats                     # Show cache statistics\n";
+    std::cerr << "  remake --remote-stats              # Show remote cache statistics\n";
     std::cerr << "  remake --clear-stats               # Reset cache statistics to zero\n";
     std::cerr << "  remake --clean                     # Clean cache\n";
     std::cerr << "  remake --version                   # Show version\n";
     std::cerr << "\n";
+    std::cerr << "Options:\n";
+    std::cerr << "  --remote-url <url>        Remote cache endpoint (e.g., http://cache:8080)\n";
+    std::cerr << "  --remote-read-only        Remote cache read-only mode\n";
+    std::cerr << "  --remote-timeout <ms>     Remote connect/read timeout in ms\n";
+    std::cerr << "\n";
     std::cerr << "Environment:\n";
-    std::cerr << "  BUILDCACHE_DIR         Cache directory\n";
-    std::cerr << "  BUILDCACHE_MAX_SIZE    Max cache size (e.g., 10G, 500M)\n";
-    std::cerr << "  BUILDCACHE_MAX_AGE     Max age in days\n";
-    std::cerr << "  BUILDCACHE_COMPRESSION Enable/disable compression (true/false)\n";
-    std::cerr << "  BUILDCACHE_READ_ONLY   Read-only cache (true/false)\n";
-    std::cerr << "  REMAKE_DISABLE=1       Disable cache (passthrough)\n";
-    std::cerr << "  REMAKE_DEBUG=1         Debug logging\n";
+    std::cerr << "  BUILDCACHE_DIR              Cache directory\n";
+    std::cerr << "  BUILDCACHE_MAX_SIZE         Max cache size (e.g., 10G, 500M)\n";
+    std::cerr << "  BUILDCACHE_MAX_AGE          Max age in days\n";
+    std::cerr << "  BUILDCACHE_COMPRESSION      Enable/disable compression (true/false)\n";
+    std::cerr << "  BUILDCACHE_READ_ONLY        Read-only cache (true/false)\n";
+    std::cerr << "  BUILDCACHE_REMOTE_URL       Remote cache endpoint\n";
+    std::cerr << "  BUILDCACHE_REMOTE_READ_ONLY Remote read-only (true/false)\n";
+    std::cerr << "  BUILDCACHE_REMOTE_TIMEOUT   Remote timeout in ms\n";
+    std::cerr << "  REMAKE_DISABLE=1            Disable cache (passthrough)\n";
+    std::cerr << "  REMAKE_DEBUG=1              Debug logging\n";
     std::cerr << "\n";
     std::cerr << "Config file (.buildcache.conf):\n";
     std::cerr << "  max_cache_size = 10G\n";
@@ -159,6 +169,17 @@ int main(int argc, char* argv[]) {
             cli_overrides->remote_url = argv[++i];
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
+        } else if (arg == "--remote-read-only" && i + 1 < argc) {
+            if (!cli_overrides) cli_overrides = remake::CacheConfig{};
+            cli_overrides->read_only = remake::ConfigParser::parse_bool(argv[++i]);
+            arg_consumed[i] = true;
+            arg_consumed[i-1] = true;
+        } else if (arg == "--remote-timeout" && i + 1 < argc) {
+            if (!cli_overrides) cli_overrides = remake::CacheConfig{};
+            try { cli_overrides->remote_connect_timeout_ms = std::stoi(argv[++i]); } catch (...) {}
+            cli_overrides->remote_read_timeout_ms = cli_overrides->remote_connect_timeout_ms;
+            arg_consumed[i] = true;
+            arg_consumed[i-1] = true;
         }
     }
     
@@ -207,6 +228,23 @@ int main(int argc, char* argv[]) {
     if (arg1 == "--clean") {
         fs::remove_all(config.cache_dir);
         std::cout << "Cache cleaned" << std::endl;
+        return 0;
+    }
+    if (arg1 == "--remote-stats") {
+        auto cache = remake::Cache(config.cache_dir, config);
+        auto rstats = cache.get_remote_stats();
+        std::cout << "=== Remote Cache Statistics ===\n";
+        std::cout << "Remote Hits:    " << rstats.remote_hits << "\n";
+        std::cout << "Remote Misses:  " << rstats.remote_misses << "\n";
+        std::cout << "Uploads:        " << rstats.uploads << "\n";
+        std::cout << "Downloads:      " << rstats.downloads << "\n";
+        std::cout << "Errors:         " << rstats.errors << "\n";
+        if (rstats.remote_hits + rstats.remote_misses > 0) {
+            double hit_rate = (static_cast<double>(rstats.remote_hits) / 
+                              (rstats.remote_hits + rstats.remote_misses)) * 100.0;
+            std::cout << "Remote Hit Rate: " << std::fixed << std::setprecision(1) << hit_rate << "%\n";
+        }
+        std::cout << "==============================\n";
         return 0;
     }
     if (arg1 == "--cache-dir") {

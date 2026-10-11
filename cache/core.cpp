@@ -274,24 +274,41 @@ struct FileLock::Impl {
                 return false;
             }
             
-            int flock_op = (type == FileLock::LockType::Shared) ? LOCK_SH : LOCK_EX;
+            // Use non-blocking flock with retry loop to avoid indefinite blocking
+            // on filesystems where flock() may block indefinitely (e.g., macOS tmpfs)
+            int flock_op = (type == FileLock::LockType::Shared) ? (LOCK_SH | LOCK_NB) : (LOCK_EX | LOCK_NB);
             
-            if (flock(fd_, flock_op) < 0) {
+            while (true) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+                if (elapsed >= timeout_ms) {
+                    close(fd_);
+                    fd_ = -1;
+                    return false;
+                }
+                
+                if (flock(fd_, flock_op) == 0) {
+                    locked_ = true;
+                    return true;
+                }
+                
                 int err = errno;
-                close(fd_);
-                fd_ = -1;
                 if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK || err == EDEADLK) {
                     int sleep_ms = (50 < 10 * (attempt + 1)) ? 50 : 10 * (attempt + 1);
-                    if (elapsed + sleep_ms > timeout_ms) return false;
+                    if (elapsed + sleep_ms > timeout_ms) {
+                        close(fd_);
+                        fd_ = -1;
+                        return false;
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
                     attempt++;
                     continue;
                 }
+                
+                close(fd_);
+                fd_ = -1;
                 return false;
             }
-            
-            locked_ = true;
-            return true;
         }
     }
     

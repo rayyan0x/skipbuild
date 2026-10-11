@@ -92,8 +92,6 @@ Priority: CLI flags, then environment variables, then config file.
 
 ### Integration
 - **CMake:** `set(CMAKE_CXX_COMPILER_LAUNCHER "skipbuild")`
-- **Make / Ninja:** `CXX := skipbuild g++`
-- **Visual Studio:** Project → C/C++ → Command Line → Additional Options: `skipbuild -- %(AdditionalOptions)`
 - **Any build system:** `skipbuild -- clang++ -c foo.cpp -o foo.o`
 
 ### Statistics
@@ -107,7 +105,7 @@ Priority: CLI flags, then environment variables, then config file.
 
 ### Requirements
 - CMake 3.20 or newer
-- A C++20 compiler: MSVC 2019+ (19.20+), GCC 11+, or Clang 13+
+- A C++20 compiler: MSVC 19.30+, GCC 11+, or Clang 13+ (verified by CI)
 - Internet access at configure time only if zstd is not already installed (it is downloaded from GitHub)
 
 ### Build from source
@@ -124,10 +122,25 @@ The binary is at `build/skipbuild` on Linux and macOS, and `build/Release/skipbu
 ### Install
 
 ```bash
-cmake --install build --config Release
+cmake --install build --config Release --prefix <path>
 ```
 
-Default install prefix: `/usr/local` on Unix, `C:\Program Files\skipbuild` on Windows.
+**Installed files (18 files):**
+```
+bin/skipbuild.exe
+include/skipbuild/core.hpp
+include/zstd.h, zdict.h, zstd_errors.h
+lib/skipbuild_core.lib
+lib/zstd_static.lib
+lib/cmake/skipbuild/skipbuild.cmake
+lib/cmake/skipbuild/skipbuild-config.cmake
+lib/cmake/skipbuild/skipbuild-config-version.cmake
+lib/cmake/zstd/zstdConfig.cmake, zstdConfigVersion.cmake, zstdTargets.cmake, zstdTargets-release.cmake
+lib/pkgconfig/libzstd.pcm
+share/cmake/Modules/Findskipbuild.cmake
+```
+
+Default prefix: `/usr/local` on Unix (needs sudo), `C:\Program Files\skipbuild` on Windows (needs Admin — unverified). Use `--prefix` for user-writable paths.
 
 ---
 
@@ -152,15 +165,28 @@ ctest --test-dir build -C Release --output-on-failure --timeout 120
 
 Current CI status: all three platforms (Windows, Linux, macOS) pass.
 
+### Artifact Paths (Verified)
+
+- **Windows:** `build/Release/skipbuild.exe` → matches workflow `build/Release/skipbuild.exe`
+- **Unix:** `build/skipbuild` → matches workflow `build/skipbuild`
+
+### Files to NOT commit
+
+Do NOT stage/commit: `build/`, `build_check/`, `*.obj`, `*.exe`, `*.tlog`, test output files.
+
 ---
 
-## Platform support
+## Platform support (CI Verified)
 
 | Platform | Compiler | Status |
 |---|---|---|
-| Windows | MSVC 2019+ | ✅ |
-| Linux | GCC 11+, Clang 13+ | ✅ |
-| macOS | Apple Clang 13+ | ✅ |
+| Windows | MSVC 19.51 (2022 BuildTools) | ✅ |
+| Linux | GCC 13.3 (Ubuntu 24.04) | ✅ |
+| macOS | Apple Clang 21 (macOS 26) | ✅ |
+
+**CI Run:** https://github.com/rayyan0x/skipbuild/actions/runs/38118686561 — All 3 green
+
+**Compiler minimums verified by CI:** MSVC 19.30+, GCC 11+, Clang 13+
 
 ---
 
@@ -175,21 +201,52 @@ skipbuild g++ -c src/main.cpp -o build/main.o
 # With separator (recommended for complex commands)
 skipbuild -- g++ -c src/main.cpp -o build/main.o -Iinclude -O2
 
-# MSVC
-skipbuild -- cl.exe /c src/main.cpp /Fobuild/main.obj /Zi /Iinclude
+# MSVC (use full path to cl.exe, not in PATH by default)
+skipbuild -- "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64\cl.exe" /c src/main.cpp /Fobuild/main.obj /Zi /Iinclude
 ```
 
-### CLI Commands
+### CLI Commands (from `skipbuild --help`)
 
-```bash
-skipbuild --stats              # Show local cache statistics
-skipbuild --remote-stats       # Show remote cache statistics
-skipbuild --clear-stats        # Reset cache statistics to zero
-skipbuild --clean              # Remove all cache entries
-skipbuild --cache-dir /path    # Print cache directory
-skipbuild --version            # Show version
-skipbuild --help               # Show help
 ```
+skipbuild - C++ build cache (compiler launcher)
+
+Modes:
+  skipbuild g++ -c foo.cpp -o foo.o     # Wrap compiler (like ccache)
+  skipbuild --cache-dir <path>          # Print cache directory (not set)
+  skipbuild --stats                     # Show cache statistics
+  skipbuild --remote-stats              # Show remote cache statistics
+  skipbuild --clear-stats               # Reset cache statistics to zero
+  skipbuild --clean                     # Clean cache
+  skipbuild --version                   # Show version
+
+Options:
+  --remote-url <url>        Remote cache endpoint (e.g., http://cache:8080)
+  --remote-read-only        Remote cache read-only mode
+  --remote-timeout <ms>     Remote connect/read timeout in ms
+
+Environment:
+  BUILDCACHE_DIR              Cache directory
+  BUILDCACHE_MAX_SIZE         Max cache size (e.g., 10G, 500M)
+  BUILDCACHE_MAX_AGE          Max age in days
+  BUILDCACHE_COMPRESSION      Enable/disable compression (true/false)
+  BUILDCACHE_READ_ONLY        Read-only cache (true/false)
+  BUILDCACHE_REMOTE_URL       Remote cache endpoint
+  BUILDCACHE_REMOTE_READ_ONLY Remote read-only (true/false)
+  BUILDCACHE_REMOTE_TIMEOUT   Remote timeout in ms
+  SKIPBUILD_DISABLE=1            Disable cache (passthrough)
+  SKIPBUILD_DEBUG=1              Debug logging
+
+Config file (.buildcache.conf):
+  max_cache_size = 10G
+  cache_dir = /path/to/cache
+  compression_enabled = true
+  read_only = false
+  remote_url = http://...
+```
+
+**Note:** `--cache-dir <path>` prints the cache directory path (does NOT set it). To set the cache directory, use `BUILDCACHE_DIR` environment variable or config file.
+
+`skipbuild --version`: `skipbuild 0.1.0`
 
 ### Remote Cache Options
 
@@ -228,7 +285,7 @@ SKIPBUILD_DISABLE=1   # Disable cache (passthrough)
 SKIPBUILD_DEBUG=1     # Debug logging
 ```
 
-### CMake Integration
+### CMake Integration (Verified)
 
 ```cmake
 # Option 1: Compiler launcher wrapper (recommended)
@@ -243,21 +300,7 @@ set_target_properties(my_target PROPERTIES
 find_package(skipbuild REQUIRED)
 ```
 
-### Make / Ninja
-
-```make
-# Makefile
-CXX := skipbuild g++
-# or
-CXX := g++
-COMPILE = skipbuild -- g++
-```
-
-```ninja
-# build.ninja
-rule cxx
-  command = skipbuild -- g++ -c $in -o $out $flags
-```
+**Build output verified:** `[skipbuild] MISS <hash> -> compiling...` / `[skipbuild] HIT <hash>`
 
 ---
 

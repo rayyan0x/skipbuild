@@ -42,21 +42,40 @@ It is for C++ developers who want to eliminate 40+ minute compilation bottleneck
 
 ## Quick start
 
-```bash
-# 1. Build from source (all OSes)
-git clone https://github.com/rayyan0x/skipbuild.git && cd skipbuild
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release --parallel
+```powershell
+# 1. Open "Developer PowerShell for VS 2022" (sets up cl.exe, INCLUDE, LIB)
 
-# 2. Wrap one compilation (MSVC example with real paths)
-build/Release/skipbuild.exe -- "F:\VS_BuildTools\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe" /c /EHsc /std:c++20 /I"F:\VS_BuildTools\VC\Tools\MSVC\14.51.36231\include" /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt" test.cpp /Fotest.obj
-# Output: [skipbuild] MISS <hash> -> compiling...
+# 2. Build skipbuild from source
+git clone https://github.com/rayyan0x/skipbuild.git
+cd skipbuild
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
 
-# 3. Run the exact same command again
-build/Release/skipbuild.exe -- "F:\VS_BuildTools\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe" /c /EHsc /std:c++20 /I"F:\VS_BuildTools\VC\Tools\MSVC\14.51.36231\include" /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt" test.cpp /Fotest.obj
-# Output: [skipbuild] HIT <hash>
+# 3. Create a test file
+echo '#include <stdio.h>
+int main() { printf("Hello, skipbuild!\n"); return 0; }' > hello.cpp
 
-# 4. Check statistics
-build/Release/skipbuild.exe --stats
+# 4. First compile: cache MISS
+build\Release\skipbuild.exe -- cl.exe /c hello.cpp /Fohello.obj
+# Output:
+# Microsoft (R) C/C++ Optimizing Compiler Version 19.51.36260 for x64
+# Copyright (C) Microsoft Corporation.  All rights reserved.
+# hello.cpp
+# [skipbuild] MISS 48476142e635 -> compiling...
+
+# 5. Second compile: cache HIT
+build\Release\skipbuild.exe -- cl.exe /c hello.cpp /Fohello.obj
+# Output:
+# [skipbuild] HIT 48476142e635
+
+# 6. Check statistics
+build\Release\skipbuild.exe --stats
+# Output:
+# === Build Cache Statistics ===
+# Cache Hit Rate:     33.3%
+# Total Hits:         2
+# Total Misses:       4
+# ...
 ```
 
 ---

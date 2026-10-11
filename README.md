@@ -67,19 +67,12 @@ cmake --build build --config Release --parallel
 
 ### Compression
 - Zstd level 3, roughly 70% size reduction on object files.
-- Zstd is fetched and built automatically at configure time if not installed, so no manual setup is needed.
-
-### Remote cache
-- HTTP and S3-compatible storage (AWS S3, MinIO) via presigned URLs and SigV4.
-- Fail-fast timeouts: 3 s connect and read by default, one retry, immediate fallback on 5xx.
-- Read-only mode for CI replicas.
-- **Zero external dependencies:** uses WinHTTP on Windows, POSIX sockets on Linux/macOS — no cURL/OpenSSL required.
+- Zstd 1.5.5 is fetched and built automatically at configure time via FetchContent, so no manual setup is needed.
 
 ### Resilience
 - **Transparent fallback:** any cache error logs a warning and runs the native compiler.
 - **Cache is advisory:** the compiler always runs on a miss. A broken cache never blocks a build.
-- **Remote timeout to local fallback:** an unreachable remote cache falls back to local cache or a native compile.
-- **Read-only mode:** `BUILDCACHE_READ_ONLY` / `--read-only` for CI read-only replicas.
+- **Read-only mode:** `SKIPBUILD_DISABLE=1` disables cache (passthrough).
 
 ### Configuration
 Priority: CLI flags, then environment variables, then config file.
@@ -87,17 +80,21 @@ Priority: CLI flags, then environment variables, then config file.
 | Source | Example |
 |---|---|
 | Config file | `.buildcache.conf` or `~/.config/buildcache/config` |
-| Environment | `BUILDCACHE_DIR`, `BUILDCACHE_MAX_SIZE=10G`, `BUILDCACHE_REMOTE_URL` |
-| CLI | `--cache-dir`, `--max-cache-size`, `--remote-url`, `--stats`, `--clean` |
+| Environment | `BUILDCACHE_DIR`, `BUILDCACHE_MAX_SIZE=10G` |
+| CLI | `--cache-dir`, `--max-cache-size`, `--stats`, `--clean` |
 
 ### Integration
-- **CMake:** `set(CMAKE_CXX_COMPILER_LAUNCHER "skipbuild")`
+- **CMake (Ninja/Make generators):** `set(CMAKE_CXX_COMPILER_LAUNCHER "skipbuild")` — enables skipbuild for all targets
+- **CMake (per-target, installed):** `find_package(skipbuild REQUIRED); skipbuild_enable_target(my_target)`
+- **MSVC (verified):** `skipbuild -- cl.exe /c /EHsc /std:c++20 /I<include> test.cpp /Fotest.obj`
 - **Any build system:** `skipbuild -- clang++ -c foo.cpp -o foo.o`
 
 ### Statistics
 - Local: hits, misses, hit rate, bytes and time saved, entry count, total size.
-- Remote: hits, misses, uploads, downloads, errors.
-- Commands: `--stats`, `--remote-stats`, `--clear-stats`, `--clean`.
+- Commands: `--stats`, `--clear-stats`.
+
+### Cache Management
+- `--clean` — Remove all cache entries
 
 ---
 
@@ -105,8 +102,8 @@ Priority: CLI flags, then environment variables, then config file.
 
 ### Requirements
 - CMake 3.20 or newer
-- A C++20 compiler: MSVC 19.30+, GCC 11+, or Clang 13+ (verified by CI)
-- Internet access at configure time only if zstd is not already installed (it is downloaded from GitHub)
+- A C++20 compiler: MSVC 19.30+, GCC 11+, or Clang 13+
+- Internet access at configure time to fetch zstd 1.5.5 via FetchContent
 
 ### Build from source
 
@@ -136,11 +133,11 @@ lib/cmake/skipbuild/skipbuild.cmake
 lib/cmake/skipbuild/skipbuild-config.cmake
 lib/cmake/skipbuild/skipbuild-config-version.cmake
 lib/cmake/zstd/zstdConfig.cmake, zstdConfigVersion.cmake, zstdTargets.cmake, zstdTargets-release.cmake
-lib/pkgconfig/libzstd.pcm
+lib/pkgconfig/libzstd.pc
 share/cmake/Modules/Findskipbuild.cmake
 ```
 
-Default prefix: `/usr/local` on Unix (needs sudo), `C:\Program Files\skipbuild` on Windows (needs Admin — unverified). Use `--prefix` for user-writable paths.
+Default prefix: `/usr/local` on Unix (needs sudo), `C:\Program Files\skipbuild` on Windows (needs Admin). Use `--prefix` for user-writable paths.
 
 ---
 
@@ -167,8 +164,8 @@ Current CI status: all three platforms (Windows, Linux, macOS) pass.
 
 ### Artifact Paths (Verified)
 
-- **Windows:** `build/Release/skipbuild.exe` → matches workflow `build/Release/skipbuild.exe`
-- **Unix:** `build/skipbuild` → matches workflow `build/skipbuild`
+- **Windows:** `build/Release/skipbuild.exe`
+- **Unix:** `build/skipbuild`
 
 ### Files to NOT commit
 
@@ -176,17 +173,15 @@ Do NOT stage/commit: `build/`, `build_check/`, `*.obj`, `*.exe`, `*.tlog`, test 
 
 ---
 
-## Platform support (CI Verified)
+## Platform support
 
 | Platform | Compiler | Status |
 |---|---|---|
-| Windows | MSVC 19.51 (2022 BuildTools) | ✅ |
-| Linux | GCC 13.3 (Ubuntu 24.04) | ✅ |
-| macOS | Apple Clang 21 (macOS 26) | ✅ |
+| Windows | MSVC 19.51 (2022 BuildTools) | ✅ (verified on local PC) |
+| Linux | GCC 13.3 (Ubuntu 24.04) | ✅ (CI) |
+| macOS | Apple Clang 21 (macOS 26) | ✅ (CI) |
 
 **CI Run:** https://github.com/rayyan0x/skipbuild/actions/runs/38118686561 — All 3 green
-
-**Compiler minimums verified by CI:** MSVC 19.30+, GCC 11+, Clang 13+
 
 ---
 
@@ -201,8 +196,8 @@ skipbuild g++ -c src/main.cpp -o build/main.o
 # With separator (recommended for complex commands)
 skipbuild -- g++ -c src/main.cpp -o build/main.o -Iinclude -O2
 
-# MSVC (use full path to cl.exe, not in PATH by default)
-skipbuild -- "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64\cl.exe" /c src/main.cpp /Fobuild/main.obj /Zi /Iinclude
+# MSVC (verified, full path required as cl.exe not in PATH by default)
+skipbuild -- "F:\VS_BuildTools\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe" /c /EHsc /std:c++20 /I"F:\VS_BuildTools\VC\Tools\MSVC\14.51.36231\include" /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt" test.cpp /Fotest.obj
 ```
 
 ### CLI Commands (from `skipbuild --help`)
@@ -212,17 +207,17 @@ skipbuild - C++ build cache (compiler launcher)
 
 Modes:
   skipbuild g++ -c foo.cpp -o foo.o     # Wrap compiler (like ccache)
-  skipbuild --cache-dir <path>          # Print cache directory (not set)
+  skipbuild --cache-dir <path>          # Print cache directory (does not set it)
   skipbuild --stats                     # Show cache statistics
-  skipbuild --remote-stats              # Show remote cache statistics
   skipbuild --clear-stats               # Reset cache statistics to zero
   skipbuild --clean                     # Clean cache
   skipbuild --version                   # Show version
 
 Options:
-  --remote-url <url>        Remote cache endpoint (e.g., http://cache:8080)
-  --remote-read-only        Remote cache read-only mode
-  --remote-timeout <ms>     Remote connect/read timeout in ms
+  --max-cache-size <size>   Max cache size (e.g., 10G, 500M)
+  --max-age <days>          Max age in days
+  --compression <bool>      Enable/disable compression (true/false)
+  --read-only <bool>        Read-only cache (true/false)
 
 Environment:
   BUILDCACHE_DIR              Cache directory
@@ -230,31 +225,19 @@ Environment:
   BUILDCACHE_MAX_AGE          Max age in days
   BUILDCACHE_COMPRESSION      Enable/disable compression (true/false)
   BUILDCACHE_READ_ONLY        Read-only cache (true/false)
-  BUILDCACHE_REMOTE_URL       Remote cache endpoint
-  BUILDCACHE_REMOTE_READ_ONLY Remote read-only (true/false)
-  BUILDCACHE_REMOTE_TIMEOUT   Remote timeout in ms
-  SKIPBUILD_DISABLE=1            Disable cache (passthrough)
-  SKIPBUILD_DEBUG=1              Debug logging
+  SKIPBUILD_DISABLE=1        Disable cache (passthrough)
+  SKIPBUILD_DEBUG=1          Debug logging
 
 Config file (.buildcache.conf):
   max_cache_size = 10G
   cache_dir = /path/to/cache
   compression_enabled = true
   read_only = false
-  remote_url = http://...
 ```
 
 **Note:** `--cache-dir <path>` prints the cache directory path (does NOT set it). To set the cache directory, use `BUILDCACHE_DIR` environment variable or config file.
 
 `skipbuild --version`: `skipbuild 0.1.0`
-
-### Remote Cache Options
-
-```bash
-skipbuild --remote-url http://cache:8080
-skipbuild --remote-read-only
-skipbuild --remote-timeout 5000
-```
 
 ### Configuration (Priority: CLI > Environment > Config File)
 
@@ -264,11 +247,6 @@ max_cache_size = 10G
 cache_dir = /path/to/cache
 compression_enabled = true
 read_only = false
-remote_url = http://cache.internal:8080
-remote_read_only = false
-remote_connect_timeout_ms = 3000
-remote_read_timeout_ms = 3000
-remote_max_retries = 1
 ```
 
 **Environment variables:**
@@ -278,9 +256,6 @@ BUILDCACHE_MAX_SIZE=10G
 BUILDCACHE_MAX_AGE=30
 BUILDCACHE_COMPRESSION=true
 BUILDCACHE_READ_ONLY=false
-BUILDCACHE_REMOTE_URL=http://cache.internal:8080
-BUILDCACHE_REMOTE_READ_ONLY=false
-BUILDCACHE_REMOTE_TIMEOUT=3000
 SKIPBUILD_DISABLE=1   # Disable cache (passthrough)
 SKIPBUILD_DEBUG=1     # Debug logging
 ```
@@ -288,7 +263,7 @@ SKIPBUILD_DEBUG=1     # Debug logging
 ### CMake Integration (Verified)
 
 ```cmake
-# Option 1: Compiler launcher wrapper (recommended)
+# Option 1: Compiler launcher wrapper (recommended, Ninja/Make generators)
 set(CMAKE_CXX_COMPILER_LAUNCHER "skipbuild")
 
 # Option 2: Per-target
@@ -296,8 +271,9 @@ set_target_properties(my_target PROPERTIES
     CXX_COMPILER_LAUNCHER "skipbuild"
 )
 
-# Option 3: find_package (if installed)
+# Option 3: find_package + skipbuild_enable_target (if installed)
 find_package(skipbuild REQUIRED)
+skipbuild_enable_target(my_target)
 ```
 
 **Build output verified:** `[skipbuild] MISS <hash> -> compiling...` / `[skipbuild] HIT <hash>`
@@ -310,7 +286,7 @@ find_package(skipbuild REQUIRED)
 skipbuild/
 ├── cli/              # Compiler launcher (main.cpp)
 ├── cache/            # Core caching library
-│   ├── core.hpp/cpp  # Cache, keys, locking, remote client
+│   ├── core.hpp/cpp  # Cache, keys, locking
 │   ├── config.hpp/cpp # Config parsing (file/env/cli)
 │   ├── stats.hpp/cpp  # Statistics tracking
 │   ├── crypto.hpp    # SHA-256, HMAC (no OpenSSL)

@@ -1,0 +1,6 @@
+# Mark zstd as vendored (exclude from language statistics)
+build_check/_deps/zstd-src/** linguist-vendored
+build_check/_deps/zstd-subbuild/** linguist-vendored
+
+# Also mark any generated build files
+build_check/** linguist-vendored

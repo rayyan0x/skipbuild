@@ -41,10 +41,10 @@ int main() {
     fs::create_directories(work_dir);
     fs::create_directories(cache_dir);
     
-    // Set small cache limit: 1 MB
+    // Set small cache limit: 500 bytes (smaller than 3 compressed entries of ~315 bytes each)
     remake::CacheConfig config;
-    config.max_cache_size_bytes = 1024 * 1024;  // 1 MB
-    config.eviction_target_ratio = 0.85;  // Target 85% = 870 KB
+    config.max_cache_size_bytes = 500;  // Small enough to trigger eviction with compressed data
+    config.eviction_target_ratio = 0.85;  // Target 85% = 425 bytes
     config.max_age_days = 30;
     
     remake::Cache cache(cache_dir, config);
@@ -79,15 +79,20 @@ int main() {
     fs::path obj2 = work_dir / "test2.o";
     fs::path obj3 = work_dir / "test3.o";
     
-    // Write ~400 KB to each
+    // Write ~400 KB of incompressible random data to each
+    // (ZSTD compresses repeated 'x' to almost nothing, so use random bytes)
     std::string data(400 * 1024, 'x');
+    // Fill with pseudo-random data that won't compress well
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<char>((i * 1103515245 + 12345) % 256);
+    }
     std::ofstream(obj1) << data;
     std::ofstream(obj2) << data;
     std::ofstream(obj3) << data;
     
     std::cout << "Cache limit: " << config.max_cache_size_bytes << " bytes\n";
     std::cout << "Eviction target: " << (config.max_cache_size_bytes * config.eviction_target_ratio) << " bytes\n";
-    std::cout << "Each object: ~400 KB\n";
+    std::cout << "Each compressed object: ~300-400 bytes\n";
     
     // Put first entry
     std::cout << "Putting entry 1...\n";
@@ -135,7 +140,7 @@ int main() {
     assert(entry2.has_value() && "Entry 2 should still be present!");
     assert(entry3.has_value() && "Entry 3 (newest) should still be present!");
     
-    // Total size should be under target (85% of 1MB = ~870KB)
+    // Total size should be under target (85% of 500 = 425 bytes)
     stats = cache.get_stats();
     int64_t target = static_cast<int64_t>(config.max_cache_size_bytes * config.eviction_target_ratio);
     assert(stats.total_size <= target && "Cache size should be under eviction target!");

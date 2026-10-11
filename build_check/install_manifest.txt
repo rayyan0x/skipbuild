@@ -1,0 +1,16 @@
+C:\temp\skipbuild_install/lib/cmake/zstd/zstdTargets.cmake
+C:\temp\skipbuild_install/lib/cmake/zstd/zstdTargets-release.cmake
+C:\temp\skipbuild_install/lib/cmake/zstd/zstdConfig.cmake
+C:\temp\skipbuild_install/lib/cmake/zstd/zstdConfigVersion.cmake
+C:\temp\skipbuild_install/lib/pkgconfig/libzstd.pc
+C:\temp\skipbuild_install/include/zstd.h
+C:\temp\skipbuild_install/include/zdict.h
+C:\temp\skipbuild_install/include/zstd_errors.h
+C:\temp\skipbuild_install/lib/zstd_static.lib
+C:\temp\skipbuild_install/bin/skipbuild.exe
+C:\temp\skipbuild_install/lib/remake_core.lib
+C:\temp\skipbuild_install/include/skipbuild/core.hpp
+C:\temp\skipbuild_install/lib/cmake/skipbuild/skipbuild.cmake
+C:\temp\skipbuild_install/lib/cmake/skipbuild/skipbuild-config.cmake
+C:\temp\skipbuild_install/lib/cmake/skipbuild/skipbuild-config-version.cmake
+C:\temp\skipbuild_install/share/cmake/Modules/Findskipbuild.cmake

@@ -4,12 +4,8 @@ project(remake LANGUAGES CXX VERSION 0.1.0)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Workaround for GCC 16.1 ranges bug
-# NOTE: VERSION_LESS 17 matches all GCC < 17, not only 16.1. Narrow or remove after verifying.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17)
-    add_compile_options(-D_GLIBCXX_USE_CXX20_ABI=0 -std=c++20)
-    add_compile_options(-D_GLIBCXX_ASSERTIONS=0)
-endif()
+cmake_policy(SET CMP0135 NEW)
+set(CMAKE_POLICY_VERSION_MINIMUM "3.5" CACHE STRING "" FORCE)
 
 # ZSTD: use a system copy if present, otherwise build zstd 1.5.5 from source
 include(FetchContent)
@@ -35,27 +31,27 @@ else()
     FetchContent_MakeAvailable(zstd)
 
     set(REMAKE_ZSTD_TARGET libzstd_static)
+    set(ZSTD_INCLUDE_DIRS ${zstd_SOURCE_DIR}/lib ${zstd_SOURCE_DIR}/lib/common)
 endif()
 set(REMAKE_HAVE_ZSTD 1)
 
-# Optional: CURL for remote cache support (disabled on GCC 16.1 due to ranges bug)
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17)
-    message(STATUS "GCC 16.x detected - disabling remote cache (CURL) due to ranges bug")
-    set(REMAKE_HAVE_CURL 0)
+# Optional: CURL for remote cache support
+find_package(CURL QUIET)
+if(CURL_FOUND)
+    message(STATUS "CURL found - remote cache support enabled")
+    set(REMAKE_HAVE_CURL 1)
 else()
-    find_package(CURL QUIET)
-    if(CURL_FOUND)
-        message(STATUS "CURL found - remote cache support enabled")
-        set(REMAKE_HAVE_CURL 1)
-    else()
-        message(STATUS "CURL not found - remote cache support disabled")
-        set(REMAKE_HAVE_CURL 0)
-    endif()
+    message(STATUS "CURL not found - remote cache support disabled")
+    set(REMAKE_HAVE_CURL 0)
 endif()
 
 # Core library
 add_library(remake_core STATIC cache/core.cpp cache/stats.cpp cache/config.cpp)
 target_include_directories(remake_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cache)
+
+if(ZSTD_INCLUDE_DIRS)
+    target_include_directories(remake_core PUBLIC ${ZSTD_INCLUDE_DIRS})
+endif()
 
 if(REMAKE_HAVE_CURL)
     target_link_libraries(remake_core PUBLIC CURL::libcurl)

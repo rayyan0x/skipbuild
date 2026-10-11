@@ -1447,6 +1447,7 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                     entry.size_bytes = 0;
 
                     bool has_corrupted = false;
+                    
                     for (auto& f : std::filesystem::directory_iterator(key_dir, ec)) {
                         if (f.path().filename() != "meta.json" && f.path().filename() != ".lock") {
                             auto size = std::filesystem::file_size(f.path(), ec);
@@ -1458,7 +1459,8 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                             std::string ext = f.path().extension().string();
                             #if REMAKE_HAVE_ZSTD
                             if (ext == ".zst") {
-                                // Decompress to expected destination path (remove .zst extension)
+                                // Decompress to cache directory (remove .zst extension)
+                                // This overwrites any previously decompressed file
                                 std::filesystem::path dest_path = key_dir / f.path().stem();
                                 if (!decompress_file(f.path(), dest_path)) {
                                     has_corrupted = true;
@@ -1482,8 +1484,9 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                                     entry.outputs.push_back(dest_path);
                                 }
                                 entry.size_bytes += std::filesystem::file_size(dest_path, ec);
-                            } else
-                            #endif
+                            }
+                            // Ignore non-.zst files (they may be previously decompressed files)
+                            #else
                             {
                                 // Uncompressed file (legacy)
                                 // Check if it's a sidecar file by checking extension
@@ -1503,6 +1506,7 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                                 }
                                 entry.size_bytes += size;
                             }
+                            #endif
                         }
                     }
 

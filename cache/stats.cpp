@@ -11,7 +11,7 @@
 #endif
 
 namespace fs = std::filesystem;
-namespace remake {
+namespace skipbuild {
 
 StatsTracker::StatsTracker(const fs::path& cache_root) 
     : stats_file_(cache_root / "stats.json") {
@@ -250,4 +250,4 @@ void StatsTracker::print_summary() const {
     std::cout << "==============================" << std::endl;
 }
 
-} // namespace remake
+} // namespace skipbuild

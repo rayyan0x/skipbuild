@@ -6,7 +6,7 @@
 #include <cctype>
 
 namespace fs = std::filesystem;
-namespace remake {
+namespace skipbuild {
 
 std::string ConfigParser::trim(const std::string& s) {
     size_t start = 0;
@@ -287,4 +287,4 @@ CacheConfig ConfigParser::load_config(
     return config;
 }
 
-} // namespace remake
+} // namespace skipbuild

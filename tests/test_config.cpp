@@ -20,7 +20,7 @@ max_age_days = 60
 eviction_target_ratio = 0.9
 )";
 
-    auto values = remake::ConfigParser::parse_string(content);
+    auto values = skipbuild::ConfigParser::parse_string(content);
     
     assert(values.size() == 7);
     assert(values["max_cache_size"] == "10G");
@@ -48,7 +48,7 @@ cache_dir = C:\custom\cache
 compression_enabled = false
 )";
     
-    auto values = remake::ConfigParser::parse_file(config_file);
+    auto values = skipbuild::ConfigParser::parse_file(config_file);
     
     assert(values.size() == 3);
     assert(values["max_cache_size"] == "500M");
@@ -58,7 +58,7 @@ compression_enabled = false
     std::cout << "  PASS: Config file parsed correctly\n";
     
     // Test non-existent file
-    auto empty = remake::ConfigParser::parse_file(test_dir / "nonexistent.conf");
+    auto empty = skipbuild::ConfigParser::parse_file(test_dir / "nonexistent.conf");
     assert(empty.empty());
     std::cout << "  PASS: Non-existent file returns empty map\n";
     
@@ -68,16 +68,16 @@ compression_enabled = false
 void test_parse_size() {
     std::cout << "Testing size parsing...\n";
     
-    assert(remake::ConfigParser::parse_size("10G") == 10LL * 1024 * 1024 * 1024);
-    assert(remake::ConfigParser::parse_size("10g") == 10LL * 1024 * 1024 * 1024);
-    assert(remake::ConfigParser::parse_size("500M") == 500LL * 1024 * 1024);
-    assert(remake::ConfigParser::parse_size("500m") == 500LL * 1024 * 1024);
-    assert(remake::ConfigParser::parse_size("1024K") == 1024LL * 1024);
-    assert(remake::ConfigParser::parse_size("1024k") == 1024LL * 1024);
-    assert(remake::ConfigParser::parse_size("1000") == 1000);
-    assert(remake::ConfigParser::parse_size("2.5G") == static_cast<int64_t>(2.5 * 1024 * 1024 * 1024));
-    assert(remake::ConfigParser::parse_size("") == 0);
-    assert(remake::ConfigParser::parse_size("invalid") == 0);
+    assert(skipbuild::ConfigParser::parse_size("10G") == 10LL * 1024 * 1024 * 1024);
+    assert(skipbuild::ConfigParser::parse_size("10g") == 10LL * 1024 * 1024 * 1024);
+    assert(skipbuild::ConfigParser::parse_size("500M") == 500LL * 1024 * 1024);
+    assert(skipbuild::ConfigParser::parse_size("500m") == 500LL * 1024 * 1024);
+    assert(skipbuild::ConfigParser::parse_size("1024K") == 1024LL * 1024);
+    assert(skipbuild::ConfigParser::parse_size("1024k") == 1024LL * 1024);
+    assert(skipbuild::ConfigParser::parse_size("1000") == 1000);
+    assert(skipbuild::ConfigParser::parse_size("2.5G") == static_cast<int64_t>(2.5 * 1024 * 1024 * 1024));
+    assert(skipbuild::ConfigParser::parse_size("") == 0);
+    assert(skipbuild::ConfigParser::parse_size("invalid") == 0);
     
     std::cout << "  PASS: All size formats parsed correctly\n";
 }
@@ -85,20 +85,20 @@ void test_parse_size() {
 void test_parse_bool() {
     std::cout << "Testing boolean parsing...\n";
     
-    assert(remake::ConfigParser::parse_bool("true") == true);
-    assert(remake::ConfigParser::parse_bool("True") == true);
-    assert(remake::ConfigParser::parse_bool("TRUE") == true);
-    assert(remake::ConfigParser::parse_bool("1") == true);
-    assert(remake::ConfigParser::parse_bool("yes") == true);
-    assert(remake::ConfigParser::parse_bool("on") == true);
+    assert(skipbuild::ConfigParser::parse_bool("true") == true);
+    assert(skipbuild::ConfigParser::parse_bool("True") == true);
+    assert(skipbuild::ConfigParser::parse_bool("TRUE") == true);
+    assert(skipbuild::ConfigParser::parse_bool("1") == true);
+    assert(skipbuild::ConfigParser::parse_bool("yes") == true);
+    assert(skipbuild::ConfigParser::parse_bool("on") == true);
     
-    assert(remake::ConfigParser::parse_bool("false") == false);
-    assert(remake::ConfigParser::parse_bool("False") == false);
-    assert(remake::ConfigParser::parse_bool("0") == false);
-    assert(remake::ConfigParser::parse_bool("no") == false);
-    assert(remake::ConfigParser::parse_bool("off") == false);
-    assert(remake::ConfigParser::parse_bool("") == false);
-    assert(remake::ConfigParser::parse_bool("invalid") == false);
+    assert(skipbuild::ConfigParser::parse_bool("false") == false);
+    assert(skipbuild::ConfigParser::parse_bool("False") == false);
+    assert(skipbuild::ConfigParser::parse_bool("0") == false);
+    assert(skipbuild::ConfigParser::parse_bool("no") == false);
+    assert(skipbuild::ConfigParser::parse_bool("off") == false);
+    assert(skipbuild::ConfigParser::parse_bool("") == false);
+    assert(skipbuild::ConfigParser::parse_bool("invalid") == false);
     
     std::cout << "  PASS: All boolean formats parsed correctly\n";
 }
@@ -106,7 +106,7 @@ void test_parse_bool() {
 void test_apply_values() {
     std::cout << "Testing apply_values...\n";
     
-    remake::CacheConfig config;
+    skipbuild::CacheConfig config;
     std::map<std::string, std::string> values = {
         {"max_cache_size", "2G"},
         {"max_age_days", "90"},
@@ -120,7 +120,7 @@ void test_apply_values() {
         {"remote_max_retries", "3"}
     };
     
-    remake::ConfigParser::apply_values(config, values);
+    skipbuild::ConfigParser::apply_values(config, values);
     
     assert(config.max_cache_size_bytes == 2LL * 1024 * 1024 * 1024);
     assert(config.max_age_days == 90);
@@ -165,11 +165,11 @@ void test_precedence_hierarchy() {
     #endif
     
     // Test: defaults < global < project < env < cli
-    remake::CacheConfig cli_override;
+    skipbuild::CacheConfig cli_override;
     cli_override.max_cache_size_bytes = 4LL * 1024 * 1024 * 1024; // 4G
     cli_override.cache_dir = "/cli/cache";
     
-    auto config = remake::ConfigParser::load_config(project_dir, cli_override);
+    auto config = skipbuild::ConfigParser::load_config(project_dir, cli_override);
     
     // CLI should win
     assert(config.max_cache_size_bytes == 4LL * 1024 * 1024 * 1024);
@@ -177,7 +177,7 @@ void test_precedence_hierarchy() {
     std::cout << "  PASS: CLI overrides everything (max_cache_size=4G, cache_dir=/cli/cache)\n";
     
     // Test without CLI override - env should win
-    auto config2 = remake::ConfigParser::load_config(project_dir, std::nullopt);
+    auto config2 = skipbuild::ConfigParser::load_config(project_dir, std::nullopt);
     assert(config2.max_cache_size_bytes == 3LL * 1024 * 1024 * 1024);
     assert(config2.cache_dir == "/env/cache");
     std::cout << "  PASS: Env overrides file configs (max_cache_size=3G, cache_dir=/env/cache)\n";
@@ -192,12 +192,12 @@ void test_precedence_hierarchy() {
     #endif
     
     // Test: project overrides global
-    auto config3 = remake::ConfigParser::load_config(project_dir, std::nullopt);
+    auto config3 = skipbuild::ConfigParser::load_config(project_dir, std::nullopt);
     assert(config3.max_cache_size_bytes == 2LL * 1024 * 1024 * 1024);
     std::cout << "  PASS: Project config overrides global (max_cache_size=2G)\n";
     
     // Test: global used when no project config
-    auto config4 = remake::ConfigParser::load_config("", std::nullopt);
+    auto config4 = skipbuild::ConfigParser::load_config("", std::nullopt);
     // Global config may or may not be found depending on system state
     // Just verify it loads without error and uses some defaults
     assert(config4.max_cache_size_bytes > 0);
@@ -227,7 +227,7 @@ cache_dir = /tmp/cache
 another_key = value
 )";
     
-    auto values = remake::ConfigParser::parse_string(content);
+    auto values = skipbuild::ConfigParser::parse_string(content);
     
     // Should only parse valid lines (key without value = is parsed with empty value)
     assert(values.size() == 3);
@@ -247,7 +247,7 @@ remote_url = 'http://example.com'
 max_cache_size = "5G"
 )";
     
-    auto values = remake::ConfigParser::parse_string(content);
+    auto values = skipbuild::ConfigParser::parse_string(content);
     
     assert(values.size() == 3);
     assert(values["cache_dir"] == "/path/with spaces/cache");
@@ -268,7 +268,7 @@ CACHE_DIR = /cache
 Cache_Dir = /cache2
 )";
     
-    auto values = remake::ConfigParser::parse_string(content);
+    auto values = skipbuild::ConfigParser::parse_string(content);
     
     // Raw parser preserves case - all 5 keys are distinct
     assert(values.size() == 5);
@@ -295,12 +295,12 @@ void test_config_with_cli_overrides() {
     std::ofstream(project_config) << "max_cache_size = 1G\ncompression_enabled = true\nread_only = false\n";
     
     // CLI overrides
-    remake::CacheConfig cli_override;
+    skipbuild::CacheConfig cli_override;
     cli_override.max_cache_size_bytes = 5LL * 1024 * 1024 * 1024; // 5G
     cli_override.compression_enabled = false;
     cli_override.read_only = true;
     
-    auto config = remake::ConfigParser::load_config(project_dir, cli_override);
+    auto config = skipbuild::ConfigParser::load_config(project_dir, cli_override);
     
     assert(config.max_cache_size_bytes == 5LL * 1024 * 1024 * 1024);
     assert(config.compression_enabled == false);

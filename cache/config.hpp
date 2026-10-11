@@ -4,7 +4,7 @@
 #include <filesystem>
 #include <map>
 
-namespace remake {
+namespace skipbuild {
 
 struct CacheConfig {
     int64_t max_cache_size_bytes = 5LL * 1024 * 1024 * 1024;  // 5 GB default

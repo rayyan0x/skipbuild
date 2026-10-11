@@ -34,7 +34,7 @@
 #endif
 
 namespace fs = std::filesystem;
-namespace remake {
+namespace skipbuild {
 
 // Helper functions for remote cache integration
 static bool read_file(const fs::path& path, std::vector<uint8_t>& data) {
@@ -2511,4 +2511,4 @@ bool RemoteCache::test_connection() const {
     return impl_->client_->head(*impl_->parsed_base_url_, status_code, error);
 }
 
-} // namespace remake
+} // namespace skipbuild

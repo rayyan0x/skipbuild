@@ -42,12 +42,12 @@ int main() {
     fs::create_directories(cache_dir);
     
     // Set small cache limit: 500 bytes (smaller than 3 compressed entries of ~315 bytes each)
-    remake::CacheConfig config;
+    skipbuild::CacheConfig config;
     config.max_cache_size_bytes = 500;  // Small enough to trigger eviction with compressed data
     config.eviction_target_ratio = 0.85;  // Target 85% = 425 bytes
     config.max_age_days = 30;
     
-    remake::Cache cache(cache_dir, config);
+    skipbuild::Cache cache(cache_dir, config);
     
     // Create test source files in work_dir
     fs::path src1 = work_dir / "test1.cpp";
@@ -63,9 +63,9 @@ int main() {
     std::vector<std::string> flags = {"-O2"};
     std::string compiler = "test-compiler-1.0";
     
-    auto key1 = remake::Cache::compute_key(src1, includes, flags, compiler);
-    auto key2 = remake::Cache::compute_key(src2, includes, flags, compiler);
-    auto key3 = remake::Cache::compute_key(src3, includes, flags, compiler);
+    auto key1 = skipbuild::Cache::compute_key(src1, includes, flags, compiler);
+    auto key2 = skipbuild::Cache::compute_key(src2, includes, flags, compiler);
+    auto key3 = skipbuild::Cache::compute_key(src3, includes, flags, compiler);
     
     std::cout << "Key1 hash: " << key1.hash.substr(0, 16) << "...\n";
     std::cout << "Key2 hash: " << key2.hash.substr(0, 16) << "...\n";
@@ -150,7 +150,7 @@ int main() {
     std::cout << "\nTesting zero-byte file purging...\n";
     fs::path src4 = work_dir / "test4.cpp";
     std::ofstream(src4) << "int main() { return 4; }";
-    auto key4 = remake::Cache::compute_key(src4, includes, flags, compiler);
+    auto key4 = skipbuild::Cache::compute_key(src4, includes, flags, compiler);
     
     fs::path obj4 = work_dir / "test4.o";
     std::ofstream(obj4) << "";  // Zero-byte file
@@ -165,7 +165,7 @@ int main() {
     std::cout << "\nTesting corrupted meta.json purging...\n";
     fs::path src5 = work_dir / "test5.cpp";
     std::ofstream(src5) << "int main() { return 5; }";
-    auto key5 = remake::Cache::compute_key(src5, includes, flags, compiler);
+    auto key5 = skipbuild::Cache::compute_key(src5, includes, flags, compiler);
     
     fs::path obj5 = work_dir / "test5.o";
     std::ofstream(obj5) << data;

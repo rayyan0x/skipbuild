@@ -30,15 +30,15 @@ jobs:
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: remake-windows
-          path: build/Release/remake.exe
+          name: skipbuild-windows
+          path: build/Release/skipbuild.exe
 
       - name: Upload binary (Unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: remake-${{ runner.os }}
-          path: build/remake
+          name: skipbuild-${{ runner.os }}
+          path: build/skipbuild
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

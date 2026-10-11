@@ -10,7 +10,7 @@
 #include "config.hpp"
 #include "stats.hpp"
 
-namespace remake {
+namespace skipbuild {
 
 // Cross-platform file locking for inter-process synchronization
 class FileLock {
@@ -283,7 +283,7 @@ CacheKey compute_linker_key(const LinkerCommand& cmd);
 
 // Compression support (requires ZSTD)
 #if REMAKE_HAVE_ZSTD
-namespace remake {
+namespace skipbuild {
 enum class CompressionAlgorithm {
     ZSTD,
     LZ4
@@ -356,4 +356,4 @@ struct NetworkTimeoutConfig {
     int max_retries = 1;             // Minimal retries for fail-fast
 };
 
-} // namespace remake
+} // namespace skipbuild

@@ -11,7 +11,7 @@ int main() {
     if (fs::exists(test_cache)) fs::remove_all(test_cache);
     fs::create_directories(test_cache);
     
-    remake::Cache cache(test_cache);
+    skipbuild::Cache cache(test_cache);
     
     // Create test source file
     fs::path src = test_cache / "test.cpp";
@@ -21,7 +21,7 @@ int main() {
     std::vector<std::string> flags = {"-O2"};
     std::string compiler = "test-compiler-1.0";
     
-    auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+    auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
     assert(!key.hash.empty());
     assert(key.toolchain_id == compiler);
     std::cout << "Key computed: " << key.hash.substr(0, 16) << "...\n";

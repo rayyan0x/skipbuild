@@ -6,7 +6,7 @@
 #include <sstream>
 #include <iomanip>
 
-namespace remake {
+namespace skipbuild {
 namespace crypto {
 
 // Standalone SHA-256 implementation (based on public domain/reference implementation)

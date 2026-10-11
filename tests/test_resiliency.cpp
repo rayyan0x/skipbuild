@@ -15,7 +15,7 @@ void test_corrupted_cache_entry() {
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
-    remake::Cache cache(test_dir);
+    skipbuild::Cache cache(test_dir);
     
     // Create test source file
     fs::path src = test_dir / "test.cpp";
@@ -25,7 +25,7 @@ void test_corrupted_cache_entry() {
     std::vector<std::string> flags = {"-O2"};
     std::string compiler = "test-compiler-1.0";
     
-    auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+    auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
     
     // Create a fake cache entry with corrupted data (truncated file)
     fs::path key_dir = test_dir / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
@@ -66,7 +66,7 @@ void test_cache_put_failure_disk_full_simulation() {
     fs::permissions(readonly_dir, fs::perms::owner_read | fs::perms::group_read | fs::perms::others_read);
     #endif
     
-    remake::Cache cache(readonly_dir);
+    skipbuild::Cache cache(readonly_dir);
     
     // Create test source file
     fs::path src = test_dir / "test.cpp";
@@ -76,7 +76,7 @@ void test_cache_put_failure_disk_full_simulation() {
     std::vector<std::string> flags = {"-O2"};
     std::string compiler = "test-compiler-1.0";
     
-    auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+    auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
     
     // Create a fake output file
     fs::path obj = test_dir / "test.o";
@@ -107,7 +107,7 @@ void test_safe_get_vs_get() {
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
-    remake::Cache cache(test_dir);
+    skipbuild::Cache cache(test_dir);
     
     // Create test source file
     fs::path src = test_dir / "test.cpp";
@@ -117,7 +117,7 @@ void test_safe_get_vs_get() {
     std::vector<std::string> flags = {"-O2"};
     std::string compiler = "test-compiler-1.0";
     
-    auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+    auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
     
     // Test safe_get on non-existent key (should return nullopt, not throw)
     auto entry1 = cache.safe_get(key);
@@ -148,7 +148,7 @@ void test_execute_native_compiler() {
     
     // Test with a command that should fail (non-existent compiler)
     std::vector<std::string> args = {"/nonexistent/compiler", "-c", "test.cpp"};
-    auto result = remake::execute_native_compiler(args, "");
+    auto result = skipbuild::execute_native_compiler(args, "");
     
     assert(result.fallback_used == true);
     assert(result.exit_code != 0);
@@ -163,7 +163,7 @@ void test_execute_native_compiler() {
     #else
     std::vector<std::string> valid_args = {"echo", "hello"};
     #endif
-    auto result2 = remake::execute_native_compiler(valid_args, "");
+    auto result2 = skipbuild::execute_native_compiler(valid_args, "");
     assert(result2.fallback_used == true);
     assert(result2.exit_code == 0);
     assert(result2.stdout_output.find("hello") != std::string::npos);
@@ -175,7 +175,7 @@ void test_remote_cache_config_timeouts() {
     std::cout << "Testing remote cache timeout configuration...\n";
     
     #if REMAKE_HAVE_CURL
-    remake::RemoteCacheConfig config = remake::RemoteCache::from_env();
+    skipbuild::RemoteCacheConfig config = skipbuild::RemoteCache::from_env();
     
     // Check default values
     assert(config.connect_timeout_ms == 3000);
@@ -204,7 +204,7 @@ void test_network_fail_fast_simulation() {
     // the configuration is set correctly
     
     #if REMAKE_HAVE_CURL
-    remake::RemoteCacheConfig config;
+    skipbuild::RemoteCacheConfig config;
     config.connect_timeout_ms = 3000;
     config.read_timeout_ms = 3000;
     config.max_retries = 1;
@@ -226,7 +226,7 @@ void test_cache_restore_failure_fallback() {
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
-    remake::Cache cache(test_dir);
+    skipbuild::Cache cache(test_dir);
     
     // Create test source file
     fs::path src = test_dir / "test.cpp";
@@ -236,7 +236,7 @@ void test_cache_restore_failure_fallback() {
     std::vector<std::string> flags = {"-O2"};
     std::string compiler = "test-compiler-1.0";
     
-    auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+    auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
     
     // Create a cache entry with a file that we'll make unreadable
     fs::path key_dir = test_dir / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;

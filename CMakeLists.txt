@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(remake LANGUAGES CXX VERSION 0.1.0)
+project(skipbuild LANGUAGES CXX VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,8 +41,8 @@ target_link_libraries(remake_core PUBLIC ${REMAKE_ZSTD_TARGET})
 target_compile_definitions(remake_core PUBLIC REMAKE_HAVE_ZSTD=1)
 
 # CLI tool
-add_executable(remake cli/main.cpp)
-target_link_libraries(remake remake_core)
+add_executable(skipbuild cli/main.cpp)
+target_link_libraries(skipbuild remake_core)
 
 # Tests
 enable_testing()
@@ -64,7 +64,7 @@ add_test(NAME config_test COMMAND test_config)
 add_test(NAME stats_test COMMAND test_stats)
 
 # Install targets
-install(TARGETS remake
+install(TARGETS skipbuild
     RUNTIME DESTINATION bin
     BUNDLE DESTINATION bin
 )
@@ -73,29 +73,29 @@ install(TARGETS remake_core
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
 )
-install(FILES cache/core.hpp DESTINATION include/remake)
+install(FILES cache/core.hpp DESTINATION include/skipbuild)
 
 # CMake integration
-install(FILES cmake/remake.cmake DESTINATION lib/cmake/remake)
+install(FILES cmake/skipbuild.cmake DESTINATION lib/cmake/skipbuild)
 
 include(CMakePackageConfigHelpers)
 
 configure_package_config_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/remake-config.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/remake-config.cmake
-    INSTALL_DESTINATION lib/cmake/remake
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/skipbuild-config.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/skipbuild-config.cmake
+    INSTALL_DESTINATION lib/cmake/skipbuild
 )
 
 write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/remake-config-version.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/skipbuild-config-version.cmake
     VERSION ${PROJECT_VERSION}
     COMPATIBILITY SameMajorVersion
 )
 
 install(FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/remake-config.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/remake-config-version.cmake
-    DESTINATION lib/cmake/remake
+    ${CMAKE_CURRENT_BINARY_DIR}/skipbuild-config.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/skipbuild-config-version.cmake
+    DESTINATION lib/cmake/skipbuild
 )
 
-install(FILES cmake/Findremake.cmake DESTINATION share/cmake/Modules)
+install(FILES cmake/Findskipbuild.cmake DESTINATION share/cmake/Modules)

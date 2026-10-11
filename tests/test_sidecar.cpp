@@ -19,12 +19,12 @@ int main() {
     fs::create_directories(work_dir);
     
     // Set up cache config
-    remake::CacheConfig config;
+    skipbuild::CacheConfig config;
     config.max_cache_size_bytes = 1024 * 1024 * 1024;  // 1 GB
     config.eviction_target_ratio = 0.85;
     config.max_age_days = 30;
     
-    remake::Cache cache(test_cache, config);
+    skipbuild::Cache cache(test_cache, config);
     
     // Create test source file
     fs::path src = work_dir / "test.cpp";
@@ -44,7 +44,7 @@ int main() {
     std::vector<std::string> flags = {"-O2", "/Zi"};
     std::string compiler = "test-compiler-1.0";
     
-    auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+    auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
     std::cout << "Key hash: " << key.hash.substr(0, 16) << "...\n";
     std::cout.flush();
     
@@ -52,8 +52,8 @@ int main() {
     std::cout << "Testing sidecar file caching...\n";
     std::cout.flush();
     
-    std::vector<std::pair<fs::path, remake::SidecarType>> sidecars;
-    sidecars.emplace_back(pdb, remake::SidecarType::PDB);
+    std::vector<std::pair<fs::path, skipbuild::SidecarType>> sidecars;
+    sidecars.emplace_back(pdb, skipbuild::SidecarType::PDB);
     
     std::cout << "Putting...\n";
     std::cout.flush();
@@ -108,7 +108,7 @@ int main() {
     std::cout.flush();
     std::cout << "entry->sidecars[0].type: " << static_cast<int>(entry->sidecars[0].type) << "\n";
     std::cout.flush();
-    assert(entry->sidecars[0].type == remake::SidecarType::PDB && "Sidecar should be PDB type");
+    assert(entry->sidecars[0].type == skipbuild::SidecarType::PDB && "Sidecar should be PDB type");
     std::cout << "Type assert passed\n";
     std::cout.flush();
     std::cout << "entry->sidecars[0].relative_path.filename(): " << entry->sidecars[0].relative_path.filename() << "\n";

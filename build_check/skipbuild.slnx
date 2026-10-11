@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Solution>
+	<Configurations>
+		<BuildType Name="Debug"/>
+		<BuildType Name="Release"/>
+		<BuildType Name="MinSizeRel"/>
+		<BuildType Name="RelWithDebInfo"/>
+		<Platform Name="x64"/>
+	</Configurations>
+	<Project Path="ALL_BUILD.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="34c139b2-eb58-383f-817b-cf4d78e18470" DefaultStartup="true">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+		<BuildDependency Project="skipbuild.vcxproj"/>
+		<BuildDependency Project="test_cache.vcxproj"/>
+		<BuildDependency Project="test_cache_key_determinism.vcxproj"/>
+		<BuildDependency Project="test_concurrent.vcxproj"/>
+		<BuildDependency Project="test_config.vcxproj"/>
+		<BuildDependency Project="test_eviction.vcxproj"/>
+		<BuildDependency Project="test_multiprocess.vcxproj"/>
+		<BuildDependency Project="test_resiliency.vcxproj"/>
+		<BuildDependency Project="test_sidecar.vcxproj"/>
+		<BuildDependency Project="test_simple.vcxproj"/>
+		<BuildDependency Project="test_stats.vcxproj"/>
+	</Project>
+	<Project Path="INSTALL.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="c3a785b4-d2f0-306e-a498-afb0a4219d88">
+		<BuildDependency Project="ALL_BUILD.vcxproj"/>
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+	<Project Path="RUN_TESTS.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="082e72a2-1f36-38b3-a1f1-5664bfe9d0d8">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+	<Project Path="ZERO_CHECK.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="c675bc2d-d947-36ea-be9b-1c3b5452b0ff"/>
+	<Project Path="_deps/zstd-build/clean-all.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="258f4e4b-759f-3656-8707-c26ac1fc53ce">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+	<Project Path="_deps/zstd-build/lib/libzstd_static.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="b16c29ea-7f34-38bc-b2c8-dfdfa27d8fe6">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="remake_core.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="c9d482c3-8286-386d-9c85-71c8e43a73bd">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+	</Project>
+	<Project Path="skipbuild.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="629c5b3d-662c-3c6d-886f-678d18cc3922">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+	</Project>
+	<Project Path="test_cache.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="265e7a13-2580-30c8-9f6e-25d7cf9432f8">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+	</Project>
+	<Project Path="test_cache_key_determinism.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="21184151-0914-3766-a33e-b8be64a3b3c7">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+	</Project>
+	<Project Path="test_concurrent.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="bbaa78fc-afb5-393d-85cb-0207af203438">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+	</Project>
+	<Project Path="test_config.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="05f585db-6d84-394b-b673-e482d9483565">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+	</Project>
+	<Project Path="test_eviction.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="d426b4d9-38ac-305d-9200-e7fb562afba2">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+	</Project>
+	<Project Path="test_multiprocess.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="f7d38b33-46a6-3436-887c-ffba292f9b37">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+	</Project>
+	<Project Path="test_resiliency.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="dac5c32d-0354-3b95-9b75-187e5e64c856">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+	</Project>
+	<Project Path="test_sidecar.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="0e15ff03-12ff-32f8-93ed-d2b94e15112e">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+	</Project>
+	<Project Path="test_simple.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="cd27ef85-c64e-3114-b53e-577f41c2b57e">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+	</Project>
+	<Project Path="test_stats.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="cf6b92ec-b105-344c-82d0-fa1556dd7d85">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="_deps/zstd-build/lib/libzstd_static.vcxproj"/>
+		<BuildDependency Project="remake_core.vcxproj"/>
+	</Project>
+	<Project Path="_deps/zstd-build/lib/uninstall.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="e8612f0e-6c34-347d-b0df-c5e6b469e246">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+</Solution>

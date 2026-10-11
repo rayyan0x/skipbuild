@@ -17,7 +17,7 @@ void test_stats_hit_miss() {
     
     {
         std::cout << "  Creating cache..." << std::endl;
-        remake::Cache cache(test_dir);
+        skipbuild::Cache cache(test_dir);
         std::cout << "  Cache created" << std::endl;
         
         // Create test source file
@@ -28,7 +28,7 @@ void test_stats_hit_miss() {
         std::vector<std::string> flags = {"-O2"};
         std::string compiler = "test-compiler-1.0";
         
-        auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+        auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
         std::cout << "  Key computed" << std::endl;
         
         // Test miss - get on non-existent key
@@ -91,7 +91,7 @@ void test_stats_clear() {
     
     {
         std::cout << "  Creating cache..." << std::endl;
-        remake::Cache cache(test_dir);
+        skipbuild::Cache cache(test_dir);
         std::cout << "  Cache created" << std::endl;
         
         // Create test source file
@@ -102,7 +102,7 @@ void test_stats_clear() {
         std::vector<std::string> flags = {"-O2"};
         std::string compiler = "test-compiler-1.0";
         
-        auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+        auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
         
         // Generate some stats
         std::cout << "  Generating stats..." << std::endl;
@@ -184,7 +184,7 @@ void test_stats_persistence() {
     std::cout << "  Creating first cache instance..." << std::endl;
     {
         std::cout << "    Creating cache..." << std::endl;
-        remake::Cache cache(test_dir);
+        skipbuild::Cache cache(test_dir);
         std::cout << "    Cache created" << std::endl;
         
         // Create test source file
@@ -195,7 +195,7 @@ void test_stats_persistence() {
         std::vector<std::string> flags = {"-O2"};
         std::string compiler = "test-compiler-1.0";
         
-        auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+        auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
         
         // Generate some stats
         std::cout << "    Generating stats..." << std::endl;
@@ -216,7 +216,7 @@ void test_stats_persistence() {
     std::cout << "  Creating second cache instance..." << std::endl;
     {
         std::cout << "    Creating cache2..." << std::endl;
-        remake::Cache cache2(test_dir);
+        skipbuild::Cache cache2(test_dir);
         std::cout << "    cache2 created" << std::endl;
         std::cout << "    Getting stats..." << std::endl;
         auto stats = cache2.get_detailed_stats();
@@ -241,7 +241,7 @@ void test_stats_concurrent() {
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
-    remake::Cache cache(test_dir);
+    skipbuild::Cache cache(test_dir);
     
     // Create test source files
     std::vector<std::string> includes;
@@ -255,7 +255,7 @@ void test_stats_concurrent() {
         fs::path src = test_dir / ("test_" + std::to_string(i) + ".cpp");
         std::ofstream(src) << "int main() { return " << i << "; }";
         
-        auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+        auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
         
         // Mix of hits and misses
         auto entry = cache.safe_get(key);
@@ -297,7 +297,7 @@ void test_stats_update_cache_size() {
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
-    remake::Cache cache(test_dir);
+    skipbuild::Cache cache(test_dir);
     
     // Create test source file
     fs::path src = test_dir / "test.cpp";
@@ -307,14 +307,14 @@ void test_stats_update_cache_size() {
     std::vector<std::string> flags = {"-O2"};
     std::string compiler = "test-compiler-1.0";
     
-    auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+    auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
     
     // Put multiple entries
     for (int i = 0; i < 3; ++i) {
         fs::path obj = test_dir / ("test" + std::to_string(i) + ".o");
         std::ofstream(obj) << "object " << i;
         
-        auto key_i = remake::Cache::compute_key(src, includes, flags, compiler + std::to_string(i));
+        auto key_i = skipbuild::Cache::compute_key(src, includes, flags, compiler + std::to_string(i));
         cache.safe_put(key_i, {obj});
     }
     
@@ -336,17 +336,17 @@ void test_stats_print_summary() {
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
-    remake::Cache cache(test_dir);
+    skipbuild::Cache cache(test_dir);
     
     // Generate some stats
     cache.record_direct_execute();
     cache.record_direct_execute();
-    cache.safe_get(remake::Cache::compute_key(test_dir / "a.cpp", {}, {}, "compiler"));
+    cache.safe_get(skipbuild::Cache::compute_key(test_dir / "a.cpp", {}, {}, "compiler"));
     
     fs::path obj = test_dir / "test.o";
     std::ofstream(obj) << "object";
-    cache.safe_put(remake::Cache::compute_key(test_dir / "b.cpp", {}, {}, "compiler"), {obj});
-    cache.safe_get(remake::Cache::compute_key(test_dir / "b.cpp", {}, {}, "compiler"));
+    cache.safe_put(skipbuild::Cache::compute_key(test_dir / "b.cpp", {}, {}, "compiler"), {obj});
+    cache.safe_get(skipbuild::Cache::compute_key(test_dir / "b.cpp", {}, {}, "compiler"));
     
     // This should not crash
     cache.print_stats();

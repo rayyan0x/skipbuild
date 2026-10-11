@@ -11,12 +11,12 @@ int main() {
     if (fs::exists(test_cache)) fs::remove_all(test_cache);
     fs::create_directories(test_cache);
     
-    remake::CacheConfig config;
+    skipbuild::CacheConfig config;
     config.max_cache_size_bytes = 1024 * 1024;
     config.eviction_target_ratio = 0.85;
     config.max_age_days = 30;
     
-    remake::Cache cache(test_cache, config);
+    skipbuild::Cache cache(test_cache, config);
     
     // Create test source file
     fs::path src = test_cache / "test.cpp";
@@ -26,7 +26,7 @@ int main() {
     std::vector<std::string> flags = {"-O2"};
     std::string compiler = "test-compiler-1.0";
     
-    auto key = remake::Cache::compute_key(src, includes, flags, compiler);
+    auto key = skipbuild::Cache::compute_key(src, includes, flags, compiler);
     std::cout << "Key hash: " << key.hash << "\n";
     std::cout << "Key dir should be: " << (test_cache / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash).string() << "\n";
     

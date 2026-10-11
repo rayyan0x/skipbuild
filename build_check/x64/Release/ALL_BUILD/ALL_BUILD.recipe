@@ -1,0 +1,47 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <ProjectOutputs>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\x64\Release\ZERO_CHECK</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\Release\skipbuild.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\Release\test_cache.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\Release\test_cache_key_determinism.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\Release\test_concurrent.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\Release\test_config.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\Release\test_eviction.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\Release\test_multiprocess.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\Release\test_resiliency.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\Release\test_sidecar.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\Release\test_simple.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\Release\test_stats.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>C:\Users\wasey\OneDrive\Desktop\build C++\build_check\x64\Release\ALL_BUILD</FullPath>
+    </ProjectOutput>
+  </ProjectOutputs>
+  <ContentFiles />
+  <SatelliteDlls />
+  <NonRecipeFileRefs />
+</Project>

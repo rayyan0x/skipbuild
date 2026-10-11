@@ -4,26 +4,39 @@ project(remake LANGUAGES CXX VERSION 0.1.0)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Prefer MSVC on Windows
-if(WIN32)
-    set(CMAKE_CXX_COMPILER cl CACHE STRING "C++ compiler" FORCE)
-endif()
-
 # Workaround for GCC 16.1 ranges bug
+# NOTE: VERSION_LESS 17 matches all GCC < 17, not only 16.1. Narrow or remove after verifying.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17)
     add_compile_options(-D_GLIBCXX_USE_CXX20_ABI=0 -std=c++20)
     add_compile_options(-D_GLIBCXX_ASSERTIONS=0)
 endif()
 
-# Optional: ZSTD for artifact compression
+# ZSTD: use a system copy if present, otherwise build zstd 1.5.5 from source
+include(FetchContent)
+
 find_package(ZSTD QUIET)
 if(ZSTD_FOUND)
-    message(STATUS "ZSTD found - artifact compression enabled")
-    set(REMAKE_HAVE_ZSTD 1)
+    message(STATUS "System ZSTD found - using it")
+    set(REMAKE_ZSTD_TARGET ZSTD::libzstd)
 else()
-    message(STATUS "ZSTD not found - artifact compression disabled")
-    set(REMAKE_HAVE_ZSTD 0)
+    message(STATUS "System ZSTD not found - fetching zstd 1.5.5")
+
+    set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_SHARED   OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_STATIC   ON  CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(
+        zstd
+        URL https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz
+        URL_HASH SHA256=9c4396cc829cfae319a6e2615202e82aad41372073482fce286fac78646d3ee4
+        SOURCE_SUBDIR build/cmake
+    )
+    FetchContent_MakeAvailable(zstd)
+
+    set(REMAKE_ZSTD_TARGET libzstd_static)
 endif()
+set(REMAKE_HAVE_ZSTD 1)
 
 # Optional: CURL for remote cache support (disabled on GCC 16.1 due to ranges bug)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17)
@@ -51,12 +64,8 @@ else()
     target_compile_definitions(remake_core PUBLIC REMAKE_HAVE_CURL=0)
 endif()
 
-if(REMAKE_HAVE_ZSTD)
-    target_link_libraries(remake_core PUBLIC ZSTD::libzstd)
-    target_compile_definitions(remake_core PUBLIC REMAKE_HAVE_ZSTD=1)
-else()
-    target_compile_definitions(remake_core PUBLIC REMAKE_HAVE_ZSTD=0)
-endif()
+target_link_libraries(remake_core PUBLIC ${REMAKE_ZSTD_TARGET})
+target_compile_definitions(remake_core PUBLIC REMAKE_HAVE_ZSTD=1)
 
 # CLI tool
 add_executable(remake cli/main.cpp)
@@ -64,62 +73,38 @@ target_link_libraries(remake remake_core)
 
 # Tests
 enable_testing()
-add_executable(test_cache tests/test_cache.cpp)
-target_link_libraries(test_cache remake_core)
+
+foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats)
+    add_executable(test_${t} tests/test_${t}.cpp)
+    target_link_libraries(test_${t} remake_core)
+endforeach()
+
 add_test(NAME cache_test COMMAND test_cache)
-
-add_executable(test_concurrent tests/test_concurrent.cpp)
-target_link_libraries(test_concurrent remake_core)
 add_test(NAME concurrent_test COMMAND test_concurrent)
-
-add_executable(test_multiprocess tests/test_multiprocess.cpp)
-target_link_libraries(test_multiprocess remake_core)
 add_test(NAME multiprocess_test COMMAND test_multiprocess 0)
-
-add_executable(test_eviction tests/test_eviction.cpp)
-target_link_libraries(test_eviction remake_core)
 add_test(NAME eviction_test COMMAND test_eviction)
-
-add_executable(test_simple tests/test_simple.cpp)
-target_link_libraries(test_simple remake_core)
 add_test(NAME simple_test COMMAND test_simple)
-
-add_executable(test_sidecar tests/test_sidecar.cpp)
-target_link_libraries(test_sidecar remake_core)
 add_test(NAME sidecar_test COMMAND test_sidecar)
-
-add_executable(test_cache_key_determinism tests/test_cache_key_determinism.cpp)
-target_link_libraries(test_cache_key_determinism remake_core)
 add_test(NAME cache_key_determinism_test COMMAND test_cache_key_determinism)
-
-add_executable(test_resiliency tests/test_resiliency.cpp)
-target_link_libraries(test_resiliency remake_core)
 add_test(NAME resiliency_test COMMAND test_resiliency)
-
-add_executable(test_config tests/test_config.cpp)
-target_link_libraries(test_config remake_core)
 add_test(NAME config_test COMMAND test_config)
-
-add_executable(test_stats tests/test_stats.cpp)
-target_link_libraries(test_stats remake_core)
 add_test(NAME stats_test COMMAND test_stats)
 
 # Install targets
-install(TARGETS remake 
+install(TARGETS remake
     RUNTIME DESTINATION bin
     BUNDLE DESTINATION bin
 )
-install(TARGETS remake_core 
+install(TARGETS remake_core
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
 )
 install(FILES cache/core.hpp DESTINATION include/remake)
 
-# Install CMake integration module
+# CMake integration
 install(FILES cmake/remake.cmake DESTINATION lib/cmake/remake)
 
-# Generate and install config file for find_package()
 include(CMakePackageConfigHelpers)
 
 configure_package_config_file(
@@ -140,5 +125,4 @@ install(FILES
     DESTINATION lib/cmake/remake
 )
 
-# Also install a simple find module for older CMake
 install(FILES cmake/Findremake.cmake DESTINATION share/cmake/Modules)

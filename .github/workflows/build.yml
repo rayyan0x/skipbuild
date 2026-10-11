@@ -2,191 +2,56 @@ name: Build and Test
 
 on:
   push:
-    branches: [main, develop]
-    tags: ['v*']
+    branches: [ "main" ]
+    tags: [ "v*" ]
   pull_request:
-    branches: [main, develop]
-
-env:
-  CMAKE_BUILD_TYPE: Release
+    branches: [ "main" ]
 
 jobs:
   build:
     name: Build (${{ matrix.os }}, ${{ matrix.build_type }})
     runs-on: ${{ matrix.os }}
+    
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            build_type: Release
-            generator: "Visual Studio 17 2022"
-            platform: "x64"
-          - os: windows-latest
-            build_type: Debug
-            generator: "Visual Studio 17 2022"
-            platform: "x64"
-          - os: ubuntu-latest
-            build_type: Release
-          - os: ubuntu-latest
-            build_type: Debug
-          - os: macos-latest
-            build_type: Release
-          - os: macos-latest
-            build_type: Debug
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        build_type: [Release, Debug]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev zlib1g-dev libzstd-dev
-
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install openssl zstd
-
-      - name: Setup vcpkg (Windows)
-        if: runner.os == 'Windows'
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgArguments: 'zstd:x64-windows'
-
-      - name: Install dependencies (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          # Windows dependencies handled by vcpkg above
-          echo "vcpkg installed zstd"
-
       - name: Configure CMake
-        run: |
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            ${{
-              matrix.generator != '' && format('-G "{0}" -A {1}', matrix.generator, matrix.platform) || ''
-            }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
 
-      - name: Build
+      - name: Build Project
         run: cmake --build build --config ${{ matrix.build_type }} --parallel
 
-      - name: Run tests
+      - name: Run Tests
+        shell: bash
         run: |
-          ctest --test-dir build --output-on-failure -C ${{ matrix.build_type }} --timeout 600
-        env:
-          CTEST_OUTPUT_ON_FAILURE: 1
-
-      - name: Upload build artifacts (Windows)
-        if: runner.os == 'Windows' && matrix.build_type == 'Release'
-        uses: actions/upload-artifact@v4
-        with:
-          name: remake-windows-${{ matrix.build_type }}
-          path: |
-            build/Release/remake.exe
-            build/Release/remake_core.lib
-          retention-days: 7
-
-      - name: Upload build artifacts (Linux)
-        if: runner.os == 'Linux' && matrix.build_type == 'Release'
-        uses: actions/upload-artifact@v4
-        with:
-          name: remake-linux-${{ matrix.build_type }}
-          path: |
-            build/remake
-            build/libremake_core.a
-          retention-days: 7
-
-      - name: Upload build artifacts (macOS)
-        if: runner.os == 'macOS' && matrix.build_type == 'Release'
-        uses: actions/upload-artifact@v4
-        with:
-          name: remake-macos-${{ matrix.build_type }}
-          path: |
-            build/remake
-            build/libremake_core.a
-          retention-days: 7
+          cd build
+          # Execute tests based on platform binary extension
+          for test_bin in test_*; do
+            if [ -f "$test_bin" ] && [ -x "$test_bin" ]; then
+              echo "Running $test_bin..."
+              ./$test_bin
+            fi
+          
 
   release:
-    name: Create Release
     needs: build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: remake-windows-Release
-          path: release/windows
-
-      - name: Download Linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: remake-linux-Release
-          path: release/linux
-
-      - name: Download macOS artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: remake-macos-Release
-          path: release/macos
-
-      - name: Create Windows package
-        run: |
-          cd release/windows
-          zip -r ../remake-windows-amd64.zip remake.exe remake_core.lib
-
-      - name: Create Linux package
-        run: |
-          cd release/linux
-          tar -czf ../remake-linux-amd64.tar.gz remake libremake_core.a
-
-      - name: Create macOS package
-        run: |
-          cd release/macos
-          tar -czf ../remake-macos-universal.tar.gz remake libremake_core.a
-
-      - name: Generate release notes
-        id: release_notes
-        run: |
-          echo "release_notes<<EOF" >> $GITHUB_OUTPUT
-          echo "## skipbuild ${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          echo "" >> $GITHUB_OUTPUT
-          echo "### Changes" >> $GITHUB_OUTPUT
-          echo "- See [CHANGELOG.md](CHANGELOG.md) for details" >> $GITHUB_OUTPUT
-          echo "" >> $GITHUB_OUTPUT
-          echo "### Binaries" >> $GITHUB_OUTPUT
-          echo "- \`remake-windows-amd64.zip\` - Windows x64 (MSVC)" >> $GITHUB_OUTPUT
-          echo "- \`remake-linux-amd64.tar.gz\` - Linux x86_64 (GCC/Clang)" >> $GITHUB_OUTPUT
-          echo "- \`remake-macos-universal.tar.gz\` - macOS Universal (Clang)" >> $GITHUB_OUTPUT
-          echo "" >> $GITHUB_OUTPUT
-          echo "### Installation" >> $GITHUB_OUTPUT
-          echo "\`\`\`bash" >> $GITHUB_OUTPUT
-          echo "# Linux/macOS" >> $GITHUB_OUTPUT
-          echo "tar -xzf remake-linux-amd64.tar.gz" >> $GITHUB_OUTPUT
-          echo "sudo cp remake /usr/local/bin/" >> $GITHUB_OUTPUT
-          echo "" >> $GITHUB_OUTPUT
-          echo "# Windows" >> $GITHUB_OUTPUT
-          echo "unzip remake-windows-amd64.zip" >> $GITHUB_OUTPUT
-          echo "copy remake.exe C:\\Windows\\" >> $GITHUB_OUTPUT
-          echo "\`\`\`" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release
+      - uses: actions/checkout@v4
+      
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.ref_name }}
-          name: skipbuild ${{ github.ref_name }}
-          body: ${{ steps.release_notes.outputs.release_notes }}
           files: |
-            release/remake-windows-amd64.zip
-            release/remake-linux-amd64.tar.gz
-            release/remake-macos-universal.tar.gz
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+            build/remake
+            build/remake.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

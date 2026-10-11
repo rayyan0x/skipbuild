@@ -33,6 +33,54 @@ cmake --build build --config Release --parallel
 
 ---
 
+## **Installation**
+
+**One-line install works on Windows, Linux, and macOS:**
+```bash
+git clone https://github.com/rayyan0x/skipbuild.git && cd skipbuild && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release --parallel && cmake --install build --config Release --prefix <path>
+```
+
+### Requirements
+- CMake 3.20 or newer
+- A C++20 compiler: MSVC 19.30+, GCC 11+, or Clang 13+
+- Internet access at configure time to fetch zstd 1.5.5 via FetchContent
+
+### Build from source
+
+```bash
+git clone https://github.com/rayyan0x/skipbuild.git
+cd skipbuild
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
+```
+
+The binary is at `build/skipbuild` on Linux and macOS, and `build/Release/skipbuild.exe` on Windows (Visual Studio generator).
+
+### Install
+
+```bash
+cmake --install build --config Release --prefix <path>
+```
+
+**Installed files (18 files):**
+```
+bin/skipbuild.exe
+include/skipbuild/core.hpp
+include/zstd.h, zdict.h, zstd_errors.h
+lib/skipbuild_core.lib
+lib/zstd_static.lib
+lib/cmake/skipbuild/skipbuild.cmake
+lib/cmake/skipbuild/skipbuild-config.cmake
+lib/cmake/skipbuild/skipbuild-config-version.cmake
+lib/cmake/zstd/zstdConfig.cmake, zstdConfigVersion.cmake, zstdTargets.cmake, zstdTargets-release.cmake
+lib/pkgconfig/libzstd.pc
+share/cmake/Modules/Findskipbuild.cmake
+```
+
+Default prefix: `/usr/local` on Unix (needs sudo), `C:\Program Files\skipbuild` on Windows (needs Admin). Use `--prefix` for user-writable paths.
+
+---
+
 ## Feature comparison
 
 | Scenario | No cache | ccache | sccache | skipbuild |
@@ -95,49 +143,6 @@ Priority: CLI flags, then environment variables, then config file.
 
 ### Cache Management
 - `--clean` — Remove all cache entries
-
----
-
-## Installation
-
-### Requirements
-- CMake 3.20 or newer
-- A C++20 compiler: MSVC 19.30+, GCC 11+, or Clang 13+
-- Internet access at configure time to fetch zstd 1.5.5 via FetchContent
-
-### Build from source
-
-```bash
-git clone https://github.com/rayyan0x/skipbuild.git
-cd skipbuild
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel
-```
-
-The binary is at `build/skipbuild` on Linux and macOS, and `build/Release/skipbuild.exe` on Windows (Visual Studio generator).
-
-### Install
-
-```bash
-cmake --install build --config Release --prefix <path>
-```
-
-**Installed files (18 files):**
-```
-bin/skipbuild.exe
-include/skipbuild/core.hpp
-include/zstd.h, zdict.h, zstd_errors.h
-lib/skipbuild_core.lib
-lib/zstd_static.lib
-lib/cmake/skipbuild/skipbuild.cmake
-lib/cmake/skipbuild/skipbuild-config.cmake
-lib/cmake/skipbuild/skipbuild-config-version.cmake
-lib/cmake/zstd/zstdConfig.cmake, zstdConfigVersion.cmake, zstdTargets.cmake, zstdTargets-release.cmake
-lib/pkgconfig/libzstd.pc
-share/cmake/Modules/Findskipbuild.cmake
-```
-
-Default prefix: `/usr/local` on Unix (needs sudo), `C:\Program Files\skipbuild` on Windows (needs Admin). Use `--prefix` for user-writable paths.
 
 ---
 

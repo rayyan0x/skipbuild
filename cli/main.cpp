@@ -463,7 +463,7 @@ int main(int argc, char* argv[]) {
         for (auto& sidecar : entry->sidecars) {
             fs::path target = sidecar.original_path.empty() ? 
                 (cmd->output.parent_path() / sidecar.relative_path.filename()) : 
-                sidecar.original_path;
+                fs::path(sidecar.original_path);
             std::error_code ec;
             fs::copy_file(sidecar.relative_path, target, fs::copy_options::overwrite_existing, ec);
             if (ec) {

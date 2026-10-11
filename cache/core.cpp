@@ -1479,7 +1479,8 @@ std::string get_compiler_hash(const std::string& compiler_path) {
     // Hash file size and mtime
     auto ftime = std::filesystem::last_write_time(path);
     auto file_size = std::filesystem::file_size(path);
-    oss << file_size << "|" << ftime.time_since_epoch().count();
+    using fs_time_t = decltype(ftime.time_since_epoch().count());
+    oss << file_size << "|" << static_cast<long long>(ftime.time_since_epoch().count());
     
     // Get compiler version string
     std::string version_cmd;

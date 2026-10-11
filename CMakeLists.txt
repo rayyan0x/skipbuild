@@ -29,29 +29,12 @@ set(REMAKE_ZSTD_TARGET libzstd_static)
 set(ZSTD_INCLUDE_DIRS ${zstd_SOURCE_DIR}/lib ${zstd_SOURCE_DIR}/lib/common)
 set(REMAKE_HAVE_ZSTD 1)
 
-# Optional: CURL for remote cache support
-find_package(CURL QUIET)
-if(CURL_FOUND)
-    message(STATUS "CURL found - remote cache support enabled")
-    set(REMAKE_HAVE_CURL 1)
-else()
-    message(STATUS "CURL not found - remote cache support disabled")
-    set(REMAKE_HAVE_CURL 0)
-endif()
-
 # Core library
 add_library(remake_core STATIC cache/core.cpp cache/stats.cpp cache/config.cpp)
 target_include_directories(remake_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cache)
 
 if(ZSTD_INCLUDE_DIRS)
     target_include_directories(remake_core PUBLIC ${ZSTD_INCLUDE_DIRS})
-endif()
-
-if(REMAKE_HAVE_CURL)
-    target_link_libraries(remake_core PUBLIC CURL::libcurl)
-    target_compile_definitions(remake_core PUBLIC REMAKE_HAVE_CURL=1)
-else()
-    target_compile_definitions(remake_core PUBLIC REMAKE_HAVE_CURL=0)
 endif()
 
 target_link_libraries(remake_core PUBLIC ${REMAKE_ZSTD_TARGET})

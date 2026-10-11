@@ -66,7 +66,8 @@ StatsTracker::~StatsTracker() {
 void StatsTracker::load_from_file() {
     std::lock_guard<std::mutex> lock(file_mutex_);
     
-    if (!fs::exists(stats_file_)) {
+    std::error_code ec;
+    if (!fs::exists(stats_file_, ec)) {
         return;
     }
     

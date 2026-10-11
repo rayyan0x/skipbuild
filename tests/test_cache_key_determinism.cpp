@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdlib>
+#include <thread>
+#include <chrono>
 
 namespace fs = std::filesystem;
 
@@ -279,10 +281,57 @@ void test_linker_key_normalization() {
     fs::remove_all(test_dir);
 }
 
-int main() {
+void test_compiler_hash_changes_on_binary_change(const fs::path& self_exe) {
+    std::cout << "Testing compiler hash changes on binary change...\n";
+    
+    // Use the test binary itself as a real executable
+    // Copy it to two different names and modify one to change mtime
+    fs::path test_dir = fs::temp_directory_path() / "remake-test-compiler-hash";
+    if (fs::exists(test_dir)) fs::remove_all(test_dir);
+    fs::create_directories(test_dir);
+    
+    fs::path compiler1 = test_dir / "fake_compiler.exe";
+    fs::path compiler2 = test_dir / "fake_compiler2.exe";
+    
+    fs::copy_file(self_exe, compiler1, fs::copy_options::overwrite_existing);
+    fs::copy_file(self_exe, compiler2, fs::copy_options::overwrite_existing);
+    
+    // Modify compiler2's mtime to be different
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::ofstream(compiler2, std::ios::app) << " ";
+    
+    // Get hashes - they should differ because of mtime
+    std::string hash1 = remake::get_compiler_hash(compiler1.string());
+    std::string hash2 = remake::get_compiler_hash(compiler2.string());
+    
+    assert(hash1 != hash2);
+    assert(hash1.size() == 64); // SHA256 hex
+    assert(hash2.size() == 64);
+    
+    std::cout << "  Hash1: " << hash1.substr(0, 16) << "...\n";
+    std::cout << "  Hash2: " << hash2.substr(0, 16) << "...\n";
+    std::cout << "  PASS: Different binaries (mtime) produce different hashes\n";
+    
+    // Test same file produces same hash
+    std::string hash1_again = remake::get_compiler_hash(compiler1.string());
+    assert(hash1 == hash1_again);
+    std::cout << "  PASS: Same binary produces same hash\n";
+    
+    // Test non-existent path uses path hash fallback
+    std::string hash_missing = remake::get_compiler_hash("/nonexistent/path/compiler.exe");
+    std::string hash_missing_again = remake::get_compiler_hash("/nonexistent/path/compiler.exe");
+    assert(hash_missing == hash_missing_again);
+    assert(hash_missing.size() == 64);
+    std::cout << "  PASS: Non-existent path uses path hash fallback\n";
+    
+    fs::remove_all(test_dir);
+}
+
+int main(int argc, char* argv[]) {
+    fs::path self_exe = fs::canonical(argv[0]);
     std::cout << "=== Cache Key Determinism & Invalidation Tests ===\n\n";
     
-    test_compiler_hash_changes_on_binary_change();
+    test_compiler_hash_changes_on_binary_change(self_exe);
     std::cout << "\n";
     
     test_path_normalization();

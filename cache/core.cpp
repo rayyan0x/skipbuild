@@ -1699,38 +1699,7 @@ FallbackResult execute_native_compiler(const std::vector<std::string>& args, con
 // RemoteCache Implementation (WinHTTP-based, zero-dependency)
 // ============================================================================
 
-#if defined(_WIN32)
-
-// RAII wrapper for WinHTTP handles
-struct WinHttpHandle {
-    HINTERNET handle = nullptr;
-    WinHttpHandle() = default;
-    explicit WinHttpHandle(HINTERNET h) : handle(h) {}
-    ~WinHttpHandle() { if (handle) WinHttpCloseHandle(handle); }
-    WinHttpHandle(WinHttpHandle&& other) noexcept : handle(other.handle) { other.handle = nullptr; }
-    WinHttpHandle& operator=(WinHttpHandle&& other) noexcept {
-        if (handle) WinHttpCloseHandle(handle);
-        handle = other.handle;
-        other.handle = nullptr;
-        return *this;
-    }
-    WinHttpHandle(const WinHttpHandle&) = delete;
-    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
-    explicit operator bool() const { return handle != nullptr; }
-    operator HINTERNET() const { return handle; }
-};
-
-// Helper to convert string to wide string
-static std::wstring to_wide(const std::string& s) {
-    if (s.empty()) return L"";
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    std::wstring w(len, 0);
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
-    if (!w.empty() && w.back() == L'\0') w.pop_back();
-    return w;
-}
-
-// URL parsing helper
+// URL parsing helper (shared across platforms)
 struct ParsedUrl {
     std::string scheme;
     std::string host;
@@ -1767,7 +1736,7 @@ static std::optional<ParsedUrl> parse_url(const std::string& url) {
     return result;
 }
 
-// Build the full object URL for a cache key
+// Build the full object URL for a cache key (shared across platforms)
 static std::string build_object_url(const RemoteCache::Config& config, const std::string& key_hash, const std::string& toolchain_id) {
     std::string base = config.url;
     if (!base.empty() && base.back() != '/') base += '/';
@@ -1775,6 +1744,44 @@ static std::string build_object_url(const RemoteCache::Config& config, const std
     std::string hash_prefix1 = key_hash.substr(0, 2);
     std::string hash_prefix2 = key_hash.substr(2, 2);
     return base + toolchain_prefix + '/' + hash_prefix1 + '/' + hash_prefix2 + '/' + key_hash;
+}
+
+// HTTP response structure (shared across platforms)
+struct HttpResponse {
+    int status_code = 0;
+    std::vector<uint8_t> body;
+    std::string error;
+};
+
+#if defined(_WIN32)
+
+// RAII wrapper for WinHTTP handles
+struct WinHttpHandle {
+    HINTERNET handle = nullptr;
+    WinHttpHandle() = default;
+    explicit WinHttpHandle(HINTERNET h) : handle(h) {}
+    ~WinHttpHandle() { if (handle) WinHttpCloseHandle(handle); }
+    WinHttpHandle(WinHttpHandle&& other) noexcept : handle(other.handle) { other.handle = nullptr; }
+    WinHttpHandle& operator=(WinHttpHandle&& other) noexcept {
+        if (handle) WinHttpCloseHandle(handle);
+        handle = other.handle;
+        other.handle = nullptr;
+        return *this;
+    }
+    WinHttpHandle(const WinHttpHandle&) = delete;
+    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
+    explicit operator bool() const { return handle != nullptr; }
+    operator HINTERNET() const { return handle; }
+};
+
+// Helper to convert string to wide string
+static std::wstring to_wide(const std::string& s) {
+    if (s.empty()) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(len, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
+    if (!w.empty() && w.back() == L'\0') w.pop_back();
+    return w;
 }
 
 // Simple SHA256 using Windows CryptoAPI
@@ -1804,11 +1811,6 @@ static std::string compute_sha256_winhttp(const std::vector<uint8_t>& data) {
 }
 
 // WinHTTP client
-struct HttpResponse {
-    int status_code = 0;
-    std::vector<uint8_t> body;
-    std::string error;
-};
 
 class WinHttpClient {
     WinHttpHandle session_;

@@ -2193,6 +2193,8 @@ FallbackResult execute_native_compiler(const std::vector<std::string>& args, con
 // RemoteCache Implementation (WinHTTP-based, zero-dependency)
 // ============================================================================
 
+#if defined(_WIN32)
+
 // RAII wrapper for WinHTTP handles
 struct WinHttpHandle {
     HINTERNET handle = nullptr;
@@ -2440,6 +2442,8 @@ public:
         return request(url, "PUT", &body, content_type);
     }
 };
+
+#endif  // _WIN32
 
 #ifndef _WIN32
 // POSIX socket HTTP client for Linux/macOS

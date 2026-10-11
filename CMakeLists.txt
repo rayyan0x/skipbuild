@@ -7,32 +7,26 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 cmake_policy(SET CMP0135 NEW)
 set(CMAKE_POLICY_VERSION_MINIMUM "3.5" CACHE STRING "" FORCE)
 
-# ZSTD: use a system copy if present, otherwise build zstd 1.5.5 from source
+# ZSTD: always fetch and build zstd 1.5.5 from source (avoids target name differences across platforms)
 include(FetchContent)
 
-find_package(ZSTD QUIET)
-if(ZSTD_FOUND)
-    message(STATUS "System ZSTD found - using it")
-    set(REMAKE_ZSTD_TARGET ZSTD::libzstd)
-else()
-    message(STATUS "System ZSTD not found - fetching zstd 1.5.5")
+message(STATUS "Fetching zstd 1.5.5")
 
-    set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
-    set(ZSTD_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-    set(ZSTD_BUILD_SHARED   OFF CACHE BOOL "" FORCE)
-    set(ZSTD_BUILD_STATIC   ON  CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED   OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC   ON  CACHE BOOL "" FORCE)
 
-    FetchContent_Declare(
-        zstd
-        URL https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz
-        URL_HASH SHA256=9c4396cc829cfae319a6e2615202e82aad41372073482fce286fac78646d3ee4
-        SOURCE_SUBDIR build/cmake
-    )
-    FetchContent_MakeAvailable(zstd)
+FetchContent_Declare(
+    zstd
+    URL https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz
+    URL_HASH SHA256=9c4396cc829cfae319a6e2615202e82aad41372073482fce286fac78646d3ee4
+    SOURCE_SUBDIR build/cmake
+)
+FetchContent_MakeAvailable(zstd)
 
-    set(REMAKE_ZSTD_TARGET libzstd_static)
-    set(ZSTD_INCLUDE_DIRS ${zstd_SOURCE_DIR}/lib ${zstd_SOURCE_DIR}/lib/common)
-endif()
+set(REMAKE_ZSTD_TARGET libzstd_static)
+set(ZSTD_INCLUDE_DIRS ${zstd_SOURCE_DIR}/lib ${zstd_SOURCE_DIR}/lib/common)
 set(REMAKE_HAVE_ZSTD 1)
 
 # Optional: CURL for remote cache support

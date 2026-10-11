@@ -41,13 +41,13 @@ int main() {
     fs::create_directories(work_dir);
     fs::create_directories(cache_dir);
     
-    // Set small cache limit: 1 MB
-    remake::CacheConfig config;
-    config.max_cache_size_bytes = 1024 * 1024;  // 1 MB
-    config.eviction_target_ratio = 0.85;  // Target 85% = 870 KB
+    // Set small cache limit: 500 bytes (smaller than 3 compressed entries of ~315 bytes each)
+    skipbuild::CacheConfig config;
+    config.max_cache_size_bytes = 500;  // Small enough to trigger eviction with compressed data
+    config.eviction_target_ratio = 0.85;  // Target 85% = 425 bytes
     config.max_age_days = 30;
     
-    remake::Cache cache(cache_dir, config);
+    skipbuild::Cache cache(cache_dir, config);
     
     // Create test source files in work_dir
     fs::path src1 = work_dir / "test1.cpp";
@@ -63,9 +63,9 @@ int main() {
     std::vector<std::string> flags = {"-O2"};
     std::string compiler = "test-compiler-1.0";
     
-    auto key1 = remake::Cache::compute_key(src1, includes, flags, compiler);
-    auto key2 = remake::Cache::compute_key(src2, includes, flags, compiler);
-    auto key3 = remake::Cache::compute_key(src3, includes, flags, compiler);
+    auto key1 = skipbuild::Cache::compute_key(src1, includes, flags, compiler);
+    auto key2 = skipbuild::Cache::compute_key(src2, includes, flags, compiler);
+    auto key3 = skipbuild::Cache::compute_key(src3, includes, flags, compiler);
     
     std::cout << "Key1 hash: " << key1.hash.substr(0, 16) << "...\n";
     std::cout << "Key2 hash: " << key2.hash.substr(0, 16) << "...\n";
@@ -79,15 +79,20 @@ int main() {
     fs::path obj2 = work_dir / "test2.o";
     fs::path obj3 = work_dir / "test3.o";
     
-    // Write ~400 KB to each
+    // Write ~400 KB of incompressible random data to each
+    // (ZSTD compresses repeated 'x' to almost nothing, so use random bytes)
     std::string data(400 * 1024, 'x');
+    // Fill with pseudo-random data that won't compress well
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<char>((i * 1103515245 + 12345) % 256);
+    }
     std::ofstream(obj1) << data;
     std::ofstream(obj2) << data;
     std::ofstream(obj3) << data;
     
     std::cout << "Cache limit: " << config.max_cache_size_bytes << " bytes\n";
     std::cout << "Eviction target: " << (config.max_cache_size_bytes * config.eviction_target_ratio) << " bytes\n";
-    std::cout << "Each object: ~400 KB\n";
+    std::cout << "Each compressed object: ~300-400 bytes\n";
     
     // Put first entry
     std::cout << "Putting entry 1...\n";
@@ -135,7 +140,7 @@ int main() {
     assert(entry2.has_value() && "Entry 2 should still be present!");
     assert(entry3.has_value() && "Entry 3 (newest) should still be present!");
     
-    // Total size should be under target (85% of 1MB = ~870KB)
+    // Total size should be under target (85% of 500 = 425 bytes)
     stats = cache.get_stats();
     int64_t target = static_cast<int64_t>(config.max_cache_size_bytes * config.eviction_target_ratio);
     assert(stats.total_size <= target && "Cache size should be under eviction target!");
@@ -145,7 +150,7 @@ int main() {
     std::cout << "\nTesting zero-byte file purging...\n";
     fs::path src4 = work_dir / "test4.cpp";
     std::ofstream(src4) << "int main() { return 4; }";
-    auto key4 = remake::Cache::compute_key(src4, includes, flags, compiler);
+    auto key4 = skipbuild::Cache::compute_key(src4, includes, flags, compiler);
     
     fs::path obj4 = work_dir / "test4.o";
     std::ofstream(obj4) << "";  // Zero-byte file
@@ -160,7 +165,7 @@ int main() {
     std::cout << "\nTesting corrupted meta.json purging...\n";
     fs::path src5 = work_dir / "test5.cpp";
     std::ofstream(src5) << "int main() { return 5; }";
-    auto key5 = remake::Cache::compute_key(src5, includes, flags, compiler);
+    auto key5 = skipbuild::Cache::compute_key(src5, includes, flags, compiler);
     
     fs::path obj5 = work_dir / "test5.o";
     std::ofstream(obj5) << data;

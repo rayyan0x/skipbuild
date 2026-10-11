@@ -1,4 +1,4 @@
-name: build
+name: Build and Test
 
 on:
   push:
@@ -13,6 +13,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -23,21 +24,21 @@ jobs:
         run: cmake --build build --config Release --parallel
 
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 120
 
       - name: Upload binary (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: remake-windows
-          path: build/Release/remake.exe
+          name: skipbuild-windows
+          path: build/Release/skipbuild.exe
 
       - name: Upload binary (Unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: remake-${{ runner.os }}
-          path: build/remake
+          name: skipbuild-${{ runner.os }}
+          path: build/skipbuild
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

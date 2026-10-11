@@ -10,7 +10,7 @@
 #include "config.hpp"
 #include "stats.hpp"
 
-namespace remake {
+namespace skipbuild {
 
 // Cross-platform file locking for inter-process synchronization
 class FileLock {
@@ -281,101 +281,9 @@ std::optional<LinkerCommand> parse_linker_command(int argc, char* argv[]);
 std::string get_linker_hash(const std::string& linker_path);
 CacheKey compute_linker_key(const LinkerCommand& cmd);
 
-// Remote cache support (requires CURL)
-#if REMAKE_HAVE_CURL
-enum class RemoteCacheType {
-    None,
-    HTTP,       // Generic HTTP/REST (S3, GCS, Azure via presigned URLs)
-    LocalFS,    // NFS, shared filesystem
-    S3,         // S3-compatible (AWS S3, MinIO, etc.) with SigV4 auth
-    GCS,        // Google Cloud Storage
-    Azure,      // Azure Blob Storage
-};
-
-struct RemoteCacheConfig {
-    RemoteCacheType type = RemoteCacheType::None;
-    std::string endpoint;           // Base URL for HTTP, or path for LocalFS
-    std::string access_key;         // For S3/Azure
-    std::string secret_key;         // For S3/Azure
-    std::string region;             // For S3
-    std::string bucket;             // For S3/GCS
-    int timeout_seconds = 30;       // Legacy total timeout
-    int connect_timeout_ms = 3000;  // 3-second connect timeout (fail-fast)
-    int read_timeout_ms = 3000;     // 3-second read timeout (fail-fast)
-    int max_retries = 1;            // Minimal retries for fail-fast on 503/500
-    bool verify_ssl = true;
-    std::string auth_header;        // Custom auth header
-};
-
-// AWS SigV4 signer for S3-compatible storage
-class SigV4Signer {
-    std::string access_key_;
-    std::string secret_key_;
-    std::string region_;
-    std::string service_;
-    
-    std::string hmac_sha256(const std::string& key, const std::string& data) const;
-    std::string url_encode(const std::string& s, bool path = false) const;
-    std::string get_iso8601_time() const;
-    std::string get_date_stamp() const;
-    
-public:
-    SigV4Signer(std::string access_key, std::string secret_key, std::string region, std::string service = "s3")
-        : access_key_(std::move(access_key)), secret_key_(std::move(secret_key)), 
-          region_(std::move(region)), service_(std::move(service)) {}
-    
-    // Public utility methods
-    static std::string sha256_hex(const std::string& data);
-    
-    // Sign an HTTP request
-    std::map<std::string, std::string> sign_request(
-        const std::string& method,
-        const std::string& url,
-        const std::map<std::string, std::string>& headers,
-        const std::string& payload_hash = "UNSIGNED-PAYLOAD"
-    ) const;
-};
-
-class RemoteCache {
-    RemoteCacheConfig config_;
-    std::filesystem::path local_cache_;  // Local fallback cache
-    std::unique_ptr<SigV4Signer> signer_; // For S3-compatible
-    mutable std::mutex mutex_;            // For thread safety
-public:
-    explicit RemoteCache(RemoteCacheConfig config, std::filesystem::path local_cache);
-    
-    // Get entry from remote (falls back to local)
-    std::optional<CacheEntry> get(const CacheKey& key) const;
-    
-    // Put entry to remote (and local)
-    bool put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs);
-    
-    // Check if remote has key (HEAD request)
-    bool has(const CacheKey& key) const;
-    
-    // Delete from remote
-    bool remove(const CacheKey& key);
-    
-    // Stats
-    struct RemoteStats {
-        int64_t remote_hits = 0;
-        int64_t remote_misses = 0;
-        int64_t local_hits = 0;
-        int64_t local_misses = 0;
-        int64_t uploads = 0;
-        int64_t downloads = 0;
-        int64_t errors = 0;
-    };
-    RemoteStats get_stats() const;
-    
-    // Configure from environment
-    static RemoteCacheConfig from_env();
-};
-#endif // REMAKE_HAVE_CURL
-
 // Compression support (requires ZSTD)
 #if REMAKE_HAVE_ZSTD
-namespace remake {
+namespace skipbuild {
 enum class CompressionAlgorithm {
     ZSTD,
     LZ4
@@ -448,4 +356,4 @@ struct NetworkTimeoutConfig {
     int max_retries = 1;             // Minimal retries for fail-fast
 };
 
-} // namespace remake
+} // namespace skipbuild

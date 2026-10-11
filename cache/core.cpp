@@ -34,7 +34,7 @@
 #endif
 
 namespace fs = std::filesystem;
-namespace remake {
+namespace skipbuild {
 
 // Helper functions for remote cache integration
 static bool read_file(const fs::path& path, std::vector<uint8_t>& data) {
@@ -85,500 +85,6 @@ static bool decompress_data(const std::vector<uint8_t>& input, std::vector<uint8
     return true;
 #endif
 }
-
-#if REMAKE_HAVE_CURL
-// --- Remote Cache Support ---
-
-// Curl write callback for HTTP responses
-static size_t curl_write_callback(void* contents, size_t size, size_t nmemb, std::string* response) {
-    size_t total = size * nmemb;
-    response->append(static_cast<char*>(contents), total);
-    return total;
-}
-
-// Curl header callback for HTTP headers
-static size_t curl_header_callback(void* contents, size_t size, size_t nmemb, std::string* headers) {
-    size_t total = size * nmemb;
-    headers->append(static_cast<char*>(contents), total);
-    return total;
-}
-
-// Initialize curl with common settings
-static CURL* curl_init(const RemoteCacheConfig& config) {
-    CURL* curl = curl_easy_init();
-    if (!curl) return nullptr;
-    
-    // Use new timeout settings (fail-fast: 3 second connect/read)
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, config.connect_timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, config.read_timeout_ms);
-    // Legacy fallback
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, config.timeout_seconds);
-    
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, config.verify_ssl ? 1L : 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, config.verify_ssl ? 2L : 0L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "remake/0.1.0");
-    
-    // Fail fast on HTTP errors >= 400
-    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0L); // We'll handle HTTP codes manually
-    
-    return curl;
-}
-
-// --- AWS SigV4 Signer Implementation ---
-
-// HMAC-SHA256
-static std::string hmac_sha256(const std::string& key, const std::string& data) {
-    return crypto::hmac_sha256_hex(key, data);
-}
-
-// SHA256 hex
-static std::string sha256_hex(const std::string& data) {
-    return crypto::sha256_hex(data);
-}
-
-// URL encode
-static std::string url_encode(const std::string& s, bool path = false) {
-    std::ostringstream oss;
-    for (char c : s) {
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-            c == '-' || c == '_' || c == '.' || c == '~' || (path && c == '/')) {
-            oss << c;
-        } else {
-            oss << '%' << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << (int)(unsigned char)c;
-        }
-    }
-    return oss.str();
-}
-
-// Get current time in ISO8601 format (YYYYMMDDTHHMMSSZ)
-static std::string get_iso8601_time() {
-    auto now = std::chrono::system_clock::now();
-    auto tt = std::chrono::system_clock::to_time_t(now);
-    std::tm tm = *std::gmtime(&tt);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y%m%dT%H%M%SZ");
-    return oss.str();
-}
-
-// Get date stamp (YYYYMMDD)
-static std::string get_date_stamp() {
-    auto now = std::chrono::system_clock::now();
-    auto tt = std::chrono::system_clock::to_time_t(now);
-    std::tm tm = *std::gmtime(&tt);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y%m%d");
-    return oss.str();
-}
-
-// Build remote URL for a cache key
-static std::string build_remote_url(const RemoteCacheConfig& config, const CacheKey& key) {
-    std::string url = config.endpoint;
-    if (!url.empty() && url.back() != '/') url += '/';
-    
-    // Object key with toolchain prefix
-    std::string object_key = key.toolchain_id.substr(0, 8) + '/' + key.hash.substr(0, 2) + '/' + key.hash.substr(2, 2) + '/' + key.hash;
-    
-    // For S3-compatible, use virtual-hosted style if bucket is specified
-    if (config.type == RemoteCacheType::S3 && !config.bucket.empty()) {
-        // Remove trailing slash from endpoint if present
-        std::string endpoint = config.endpoint;
-        if (!endpoint.empty() && endpoint.back() == '/') endpoint.pop_back();
-        
-        // Check if endpoint already contains bucket (path-style)
-        if (endpoint.find(config.bucket) == std::string::npos) {
-            // Virtual-hosted style: https://bucket.endpoint/key
-            size_t scheme_end = endpoint.find("://");
-            if (scheme_end != std::string::npos) {
-                std::string scheme = endpoint.substr(0, scheme_end + 3);
-                std::string host = endpoint.substr(scheme_end + 3);
-                url = scheme + config.bucket + "." + host + "/";
-            } else {
-                url = endpoint + "/" + config.bucket + "/";
-            }
-        }
-    }
-    
-    url += object_key;
-    return url;
-}
-
-// Perform HTTP request with retry logic (fail-fast on 503/500)
-static bool curl_request(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url, 
-                         const std::string& method, const std::string* body,
-                         std::string* response, long* http_code,
-                         const std::map<std::string, std::string>* headers = nullptr) {
-    CURL* curl = curl_init(config);
-    if (!curl) return false;
-    
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
-    
-    std::string response_str;
-    std::string header_str;
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_str);
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_callback);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &header_str);
-    
-    if (body && !body->empty()) {
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body->c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body->size());
-    }
-    
-    // Prepare headers
-    std::map<std::string, std::string> request_headers;
-    request_headers["Content-Type"] = "application/octet-stream";
-    if (!config.auth_header.empty()) {
-        // Parse custom auth header (format: "Header-Name: value")
-        size_t colon = config.auth_header.find(':');
-        if (colon != std::string::npos) {
-            std::string name = config.auth_header.substr(0, colon);
-            std::string value = config.auth_header.substr(colon + 1);
-            // Trim whitespace
-            while (!value.empty() && std::isspace(value[0])) value.erase(0, 1);
-            request_headers[name] = value;
-        }
-    }
-    if (headers) {
-        for (const auto& h : *headers) {
-            request_headers[h.first] = h.second;
-        }
-    }
-    
-    // Sign request if using S3 with SigV4
-    std::string payload_hash = "UNSIGNED-PAYLOAD";
-    if (signer && body && !body->empty()) {
-        payload_hash = signer->sha256_hex(*body);
-    } else if (signer) {
-        payload_hash = signer->sha256_hex("");
-    }
-    
-    std::map<std::string, std::string> final_headers;
-    if (signer) {
-        final_headers = signer->sign_request(method, url, request_headers, payload_hash);
-    } else {
-        final_headers = request_headers;
-    }
-    
-    // Set headers
-    struct curl_slist* header_list = nullptr;
-    for (const auto& h : final_headers) {
-        header_list = curl_slist_append(header_list, (h.first + ": " + h.second).c_str());
-    }
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
-    
-    if (response) curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
-    if (response) curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
-    
-    // Retry logic with fail-fast on server errors
-    bool success = false;
-    long response_code = 0;
-    for (int attempt = 0; attempt <= config.max_retries; ++attempt) {
-        CURLcode res = curl_easy_perform(curl);
-        if (res == CURLE_OK) {
-            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-            
-            // Fail fast on server errors (500, 502, 503, 504) - don't retry
-            if (response_code == 500 || response_code == 502 || response_code == 503 || response_code == 504) {
-                if (response) *response = response_str;
-                if (http_code) *http_code = response_code;
-                curl_slist_free_all(header_list);
-                curl_easy_cleanup(curl);
-                return false; // Immediate fallback to local
-            }
-            
-            // Success (2xx) or client error (4xx) - don't retry client errors
-            if (response_code >= 200 && response_code < 300) {
-                success = true;
-                break;
-            }
-            
-            // For other codes, we could retry but let's fail fast
-            break;
-        }
-        
-        // CURL error (timeout, connection failed, etc.) - fail fast
-        if (attempt < config.max_retries) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
-        }
-    }
-    
-    if (http_code) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, http_code);
-    if (response) *response = response_str;
-    
-    curl_slist_free_all(header_list);
-    curl_easy_cleanup(curl);
-    
-    return success;
-}
-
-// Upload file via HTTP PUT
-static bool upload_file(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url, const std::filesystem::path& file) {
-    std::ifstream f(file, std::ios::binary | std::ios::ate);
-    if (!f) return false;
-    
-    std::streamsize size = f.tellg();
-    f.seekg(0, std::ios::beg);
-    
-    std::vector<char> buffer(size);
-    if (!f.read(buffer.data(), size)) return false;
-    
-    std::string body(buffer.data(), size);
-    std::string response;
-    long http_code;
-    
-    std::map<std::string, std::string> headers;
-    headers["Content-Length"] = std::to_string(size);
-    
-    bool ok = curl_request(config, signer, url, "PUT", &body, &response, &http_code, &headers);
-    return ok && (http_code >= 200 && http_code < 300);
-}
-
-// Download file via HTTP GET
-static bool download_file(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url, const std::filesystem::path& file) {
-    std::string response;
-    long http_code;
-    
-    bool ok = curl_request(config, signer, url, "GET", nullptr, &response, &http_code);
-    if (!ok || http_code < 200 || http_code >= 300) return false;
-    
-    std::filesystem::create_directories(file.parent_path());
-    std::ofstream f(file, std::ios::binary);
-    if (!f) return false;
-    f.write(response.data(), response.size());
-    return true;
-}
-
-// Check if file exists via HTTP HEAD
-static bool file_exists(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url) {
-    std::string response;
-    long http_code;
-    
-    bool ok = curl_request(config, signer, url, "HEAD", nullptr, &response, &http_code);
-    return ok && (http_code >= 200 && http_code < 300);
-}
-
-// Delete file via HTTP DELETE
-static bool delete_file(const RemoteCacheConfig& config, const SigV4Signer* signer, const std::string& url) {
-    std::string response;
-    long http_code;
-    
-    bool ok = curl_request(config, signer, url, "DELETE", nullptr, &response, &http_code);
-    return ok && (http_code >= 200 && http_code < 300);
-}
-
-// Static function for curl global init
-static void curl_global_init_once() {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-}
-
-RemoteCache::RemoteCache(RemoteCacheConfig config, std::filesystem::path local_cache)
-    : config_(std::move(config)), local_cache_(std::move(local_cache)) {
-    // Initialize curl globally
-    static std::once_flag curl_init_flag;
-    std::call_once(curl_init_flag, curl_global_init_once);
-    
-    // Create SigV4 signer for S3-compatible storage
-    if (config_.type == RemoteCacheType::S3 && !config_.access_key.empty() && !config_.secret_key.empty() && !config_.region.empty()) {
-        signer_ = std::make_unique<SigV4Signer>(config_.access_key, config_.secret_key, config_.region, "s3");
-    }
-}
-
-std::optional<CacheEntry> RemoteCache::get(const CacheKey& key) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const SigV4Signer* signer = signer_.get();
-    
-    // Try remote first
-    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
-        std::string url = build_remote_url(config_, key);
-        
-        // Try to download metadata first
-        std::string meta_url = url + "/meta.json";
-        std::string response;
-        long http_code;
-        
-        if (curl_request(config_, signer, meta_url, "GET", nullptr, &response, &http_code)) {
-            if (http_code >= 200 && http_code < 300) {
-                // Parse meta.json to get output filenames
-                // For simplicity, assume single output with same name as key
-                std::filesystem::path local_file = local_cache_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash / (key.hash + ".out");
-                
-                if (download_file(config_, signer, url + "/" + key.hash + ".out", local_file)) {
-                    CacheEntry entry;
-                    entry.key = key;
-                    entry.outputs.push_back(local_file);
-                    return entry;
-                }
-            }
-        }
-    } else if (config_.type == RemoteCacheType::LocalFS) {
-        // LocalFS: just check the shared path
-        std::filesystem::path remote_path = config_.endpoint;
-        std::filesystem::path key_path = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
-        std::filesystem::path meta_file = key_path / "meta.json";
-        
-        if (std::filesystem::exists(meta_file)) {
-            // Copy to local cache
-            std::filesystem::path local_dir = local_cache_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
-            std::filesystem::create_directories(local_dir);
-            
-            CacheEntry entry;
-            entry.key = key;
-            for (auto& f : std::filesystem::directory_iterator(key_path)) {
-                if (f.path().filename() != "meta.json") {
-                    std::filesystem::copy_file(f.path(), local_dir / f.path().filename(), 
-                                              std::filesystem::copy_options::overwrite_existing);
-                    entry.outputs.push_back(local_dir / f.path().filename());
-                }
-            }
-            return entry;
-        }
-    }
-    
-    // Fallback to local cache
-    // (This would be handled by the local Cache class, not here)
-    return std::nullopt;
-}
-
-bool RemoteCache::put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    if (outputs.empty()) return false;
-    
-    const SigV4Signer* signer = signer_.get();
-    
-    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
-        std::string base_url = build_remote_url(config_, key);
-        
-        // Upload each output file
-        for (const auto& output : outputs) {
-            std::string file_url = base_url + "/" + output.filename().string();
-            if (!upload_file(config_, signer, file_url, output)) {
-                return false;
-            }
-        }
-        
-        // Upload metadata - write to temp file first
-        std::string meta = "{\"toolchain\":\"" + key.toolchain_id + "\",\"ts\":" + std::to_string(std::time(nullptr)) + "}";
-        std::string meta_url = base_url + "/meta.json";
-        
-        // Create temp file for metadata
-        fs::path meta_temp = fs::temp_directory_path() / ("remake_meta_" + key.hash.substr(0, 16) + ".json");
-        std::ofstream meta_file(meta_temp);
-        meta_file << meta;
-        meta_file.close();
-        
-        bool ok = upload_file(config_, signer, meta_url, meta_temp);
-        std::error_code ec;
-        fs::remove(meta_temp, ec);
-        
-        if (!ok) {
-            // Fallback: try to upload meta as string directly
-            std::string response;
-            long http_code;
-            curl_request(config_, signer, meta_url, "PUT", &meta, &response, &http_code);
-            ok = (http_code >= 200 && http_code < 300);
-        }
-        
-        return ok;
-    } else if (config_.type == RemoteCacheType::LocalFS) {
-        std::filesystem::path remote_path = config_.endpoint;
-        std::filesystem::path key_path = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
-        std::filesystem::create_directories(key_path);
-        
-        for (const auto& output : outputs) {
-            std::filesystem::copy_file(output, key_path / output.filename(), 
-                                       std::filesystem::copy_options::overwrite_existing);
-        }
-        
-        std::ofstream meta(key_path / "meta.json");
-        meta << "{\"toolchain\":\"" << key.toolchain_id << "\",\"ts\":" << std::time(nullptr) << "}";
-        
-        return true;
-    }
-    
-    return false;
-}
-
-bool RemoteCache::has(const CacheKey& key) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const SigV4Signer* signer = signer_.get();
-    
-    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
-        std::string url = build_remote_url(config_, key) + "/meta.json";
-        return file_exists(config_, signer, url);
-    } else if (config_.type == RemoteCacheType::LocalFS) {
-        std::filesystem::path remote_path = config_.endpoint;
-        std::filesystem::path meta_file = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash / "meta.json";
-        return std::filesystem::exists(meta_file);
-    }
-    return false;
-}
-
-bool RemoteCache::remove(const CacheKey& key) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const SigV4Signer* signer = signer_.get();
-    
-    if ((config_.type == RemoteCacheType::HTTP || config_.type == RemoteCacheType::S3) && !config_.endpoint.empty()) {
-        std::string url = build_remote_url(config_, key) + "/meta.json";
-        return delete_file(config_, signer, url);
-    } else if (config_.type == RemoteCacheType::LocalFS) {
-        std::filesystem::path remote_path = config_.endpoint;
-        std::filesystem::path key_path = remote_path / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
-        std::error_code ec;
-        std::filesystem::remove_all(key_path, ec);
-        return !ec;
-    }
-    return false;
-}
-
-RemoteCache::RemoteStats RemoteCache::get_stats() const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    RemoteStats stats;
-    // Stats would be tracked in a real implementation
-    return stats;
-}
-
-// RemoteCache from environment
-RemoteCacheConfig RemoteCache::from_env() {
-    RemoteCacheConfig config;
-    
-    // Type
-    if (const char* env = std::getenv("REMAKE_REMOTE_TYPE")) {
-        std::string type = env;
-        if (type == "http") config.type = RemoteCacheType::HTTP;
-        else if (type == "localfs") config.type = RemoteCacheType::LocalFS;
-        else if (type == "s3") config.type = RemoteCacheType::S3;
-        else if (type == "gcs") config.type = RemoteCacheType::GCS;
-        else if (type == "azure") config.type = RemoteCacheType::Azure;
-    }
-    
-    if (const char* env = std::getenv("REMAKE_REMOTE_ENDPOINT")) config.endpoint = env;
-    if (const char* env = std::getenv("REMAKE_REMOTE_ACCESS_KEY")) config.access_key = env;
-    if (const char* env = std::getenv("REMAKE_REMOTE_SECRET_KEY")) config.secret_key = env;
-    if (const char* env = std::getenv("REMAKE_REMOTE_REGION")) config.region = env;
-    if (const char* env = std::getenv("REMAKE_REMOTE_BUCKET")) config.bucket = env;
-    if (const char* env = std::getenv("REMAKE_REMOTE_TIMEOUT")) config.timeout_seconds = std::stoi(env);
-    if (const char* env = std::getenv("REMAKE_REMOTE_CONNECT_TIMEOUT_MS")) config.connect_timeout_ms = std::stoi(env);
-    if (const char* env = std::getenv("REMAKE_REMOTE_READ_TIMEOUT_MS")) config.read_timeout_ms = std::stoi(env);
-    if (const char* env = std::getenv("REMAKE_REMOTE_MAX_RETRIES")) config.max_retries = std::stoi(env);
-    if (const char* env = std::getenv("REMAKE_REMOTE_VERIFY_SSL")) config.verify_ssl = (std::string(env) == "1" || std::string(env) == "true");
-    if (const char* env = std::getenv("REMAKE_REMOTE_AUTH_HEADER")) config.auth_header = env;
-    
-    // S3-style auth header construction (for HTTP type with S3-compatible)
-    if (config.type == RemoteCacheType::HTTP && !config.access_key.empty() && !config.secret_key.empty()) {
-        // For S3, we'd normally sign requests with AWS SigV4
-        // For now, use basic auth header if provided
-        if (config.auth_header.empty()) {
-            config.auth_header = "Authorization: Bearer " + config.access_key;
-        }
-    }
-    
-    return config;
-}
-
-#endif // REMAKE_HAVE_CURL
 
 // --- File Lock Implementation ---
 
@@ -768,24 +274,41 @@ struct FileLock::Impl {
                 return false;
             }
             
-            int flock_op = (type == FileLock::LockType::Shared) ? LOCK_SH : LOCK_EX;
+            // Use non-blocking flock with retry loop to avoid indefinite blocking
+            // on filesystems where flock() may block indefinitely (e.g., macOS tmpfs)
+            int flock_op = (type == FileLock::LockType::Shared) ? (LOCK_SH | LOCK_NB) : (LOCK_EX | LOCK_NB);
             
-            if (flock(fd_, flock_op) < 0) {
+            while (true) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+                if (elapsed >= timeout_ms) {
+                    close(fd_);
+                    fd_ = -1;
+                    return false;
+                }
+                
+                if (flock(fd_, flock_op) == 0) {
+                    locked_ = true;
+                    return true;
+                }
+                
                 int err = errno;
-                close(fd_);
-                fd_ = -1;
                 if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK || err == EDEADLK) {
                     int sleep_ms = (50 < 10 * (attempt + 1)) ? 50 : 10 * (attempt + 1);
-                    if (elapsed + sleep_ms > timeout_ms) return false;
+                    if (elapsed + sleep_ms > timeout_ms) {
+                        close(fd_);
+                        fd_ = -1;
+                        return false;
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
                     attempt++;
                     continue;
                 }
+                
+                close(fd_);
+                fd_ = -1;
                 return false;
             }
-            
-            locked_ = true;
-            return true;
         }
     }
     
@@ -1447,6 +970,7 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                     entry.size_bytes = 0;
 
                     bool has_corrupted = false;
+                    
                     for (auto& f : std::filesystem::directory_iterator(key_dir, ec)) {
                         if (f.path().filename() != "meta.json" && f.path().filename() != ".lock") {
                             auto size = std::filesystem::file_size(f.path(), ec);
@@ -1458,7 +982,8 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                             std::string ext = f.path().extension().string();
                             #if REMAKE_HAVE_ZSTD
                             if (ext == ".zst") {
-                                // Decompress to expected destination path (remove .zst extension)
+                                // Decompress to cache directory (remove .zst extension)
+                                // This overwrites any previously decompressed file
                                 std::filesystem::path dest_path = key_dir / f.path().stem();
                                 if (!decompress_file(f.path(), dest_path)) {
                                     has_corrupted = true;
@@ -1482,8 +1007,9 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                                     entry.outputs.push_back(dest_path);
                                 }
                                 entry.size_bytes += std::filesystem::file_size(dest_path, ec);
-                            } else
-                            #endif
+                            }
+                            // Ignore non-.zst files (they may be previously decompressed files)
+                            #else
                             {
                                 // Uncompressed file (legacy)
                                 // Check if it's a sidecar file by checking extension
@@ -1503,6 +1029,7 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                                 }
                                 entry.size_bytes += size;
                             }
+                            #endif
                         }
                     }
 
@@ -1969,7 +1496,8 @@ std::string get_compiler_hash(const std::string& compiler_path) {
     // Hash file size and mtime
     auto ftime = std::filesystem::last_write_time(path);
     auto file_size = std::filesystem::file_size(path);
-    oss << file_size << "|" << ftime.time_since_epoch().count();
+    using fs_time_t = decltype(ftime.time_since_epoch().count());
+    oss << file_size << "|" << static_cast<long long>(ftime.time_since_epoch().count());
     
     // Get compiler version string
     std::string version_cmd;
@@ -2189,36 +1717,7 @@ FallbackResult execute_native_compiler(const std::vector<std::string>& args, con
 // RemoteCache Implementation (WinHTTP-based, zero-dependency)
 // ============================================================================
 
-// RAII wrapper for WinHTTP handles
-struct WinHttpHandle {
-    HINTERNET handle = nullptr;
-    WinHttpHandle() = default;
-    explicit WinHttpHandle(HINTERNET h) : handle(h) {}
-    ~WinHttpHandle() { if (handle) WinHttpCloseHandle(handle); }
-    WinHttpHandle(WinHttpHandle&& other) noexcept : handle(other.handle) { other.handle = nullptr; }
-    WinHttpHandle& operator=(WinHttpHandle&& other) noexcept {
-        if (handle) WinHttpCloseHandle(handle);
-        handle = other.handle;
-        other.handle = nullptr;
-        return *this;
-    }
-    WinHttpHandle(const WinHttpHandle&) = delete;
-    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
-    explicit operator bool() const { return handle != nullptr; }
-    operator HINTERNET() const { return handle; }
-};
-
-// Helper to convert string to wide string
-static std::wstring to_wide(const std::string& s) {
-    if (s.empty()) return L"";
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    std::wstring w(len, 0);
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
-    if (!w.empty() && w.back() == L'\0') w.pop_back();
-    return w;
-}
-
-// URL parsing helper
+// URL parsing helper (shared across platforms)
 struct ParsedUrl {
     std::string scheme;
     std::string host;
@@ -2255,7 +1754,7 @@ static std::optional<ParsedUrl> parse_url(const std::string& url) {
     return result;
 }
 
-// Build the full object URL for a cache key
+// Build the full object URL for a cache key (shared across platforms)
 static std::string build_object_url(const RemoteCache::Config& config, const std::string& key_hash, const std::string& toolchain_id) {
     std::string base = config.url;
     if (!base.empty() && base.back() != '/') base += '/';
@@ -2263,6 +1762,44 @@ static std::string build_object_url(const RemoteCache::Config& config, const std
     std::string hash_prefix1 = key_hash.substr(0, 2);
     std::string hash_prefix2 = key_hash.substr(2, 2);
     return base + toolchain_prefix + '/' + hash_prefix1 + '/' + hash_prefix2 + '/' + key_hash;
+}
+
+// HTTP response structure (shared across platforms)
+struct HttpResponse {
+    int status_code = 0;
+    std::vector<uint8_t> body;
+    std::string error;
+};
+
+#if defined(_WIN32)
+
+// RAII wrapper for WinHTTP handles
+struct WinHttpHandle {
+    HINTERNET handle = nullptr;
+    WinHttpHandle() = default;
+    explicit WinHttpHandle(HINTERNET h) : handle(h) {}
+    ~WinHttpHandle() { if (handle) WinHttpCloseHandle(handle); }
+    WinHttpHandle(WinHttpHandle&& other) noexcept : handle(other.handle) { other.handle = nullptr; }
+    WinHttpHandle& operator=(WinHttpHandle&& other) noexcept {
+        if (handle) WinHttpCloseHandle(handle);
+        handle = other.handle;
+        other.handle = nullptr;
+        return *this;
+    }
+    WinHttpHandle(const WinHttpHandle&) = delete;
+    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
+    explicit operator bool() const { return handle != nullptr; }
+    operator HINTERNET() const { return handle; }
+};
+
+// Helper to convert string to wide string
+static std::wstring to_wide(const std::string& s) {
+    if (s.empty()) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(len, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), len);
+    if (!w.empty() && w.back() == L'\0') w.pop_back();
+    return w;
 }
 
 // Simple SHA256 using Windows CryptoAPI
@@ -2292,11 +1829,6 @@ static std::string compute_sha256_winhttp(const std::vector<uint8_t>& data) {
 }
 
 // WinHTTP client
-struct HttpResponse {
-    int status_code = 0;
-    std::vector<uint8_t> body;
-    std::string error;
-};
 
 class WinHttpClient {
     WinHttpHandle session_;
@@ -2437,7 +1969,16 @@ public:
     }
 };
 
+#endif  // _WIN32
+
 #ifndef _WIN32
+#include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <sys/time.h>
+
 // POSIX socket HTTP client for Linux/macOS
 class PosixHttpClient {
     int socket_fd_ = -1;
@@ -2970,4 +2511,4 @@ bool RemoteCache::test_connection() const {
     return impl_->client_->head(*impl_->parsed_base_url_, status_code, error);
 }
 
-} // namespace remake
+} // namespace skipbuild

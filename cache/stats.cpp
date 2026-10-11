@@ -6,9 +6,12 @@
 #include <chrono>
 #include <algorithm>
 #include <filesystem>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
-namespace remake {
+namespace skipbuild {
 
 StatsTracker::StatsTracker(const fs::path& cache_root) 
     : stats_file_(cache_root / "stats.json") {
@@ -17,7 +20,44 @@ StatsTracker::StatsTracker(const fs::path& cache_root)
 
 StatsTracker::~StatsTracker() {
     try {
-        save_to_file();
+        std::lock_guard<std::mutex> lock(file_mutex_);
+        
+        // Write to temp file first for atomicity
+        fs::path temp_file = stats_file_;
+        temp_file += ".tmp";
+        
+        std::ofstream file(temp_file);
+        if (!file) return;
+        
+        file << "{\n";
+        file << "  \"hits\": " << hits_.load(std::memory_order_relaxed) << ",\n";
+        file << "  \"misses\": " << misses_.load(std::memory_order_relaxed) << ",\n";
+        file << "  \"time_saved_ms\": " << time_saved_ms_.load(std::memory_order_relaxed) << ",\n";
+        file << "  \"bytes_retrieved\": " << bytes_retrieved_.load(std::memory_order_relaxed) << ",\n";
+        file << "  \"direct_executes\": " << direct_executes_.load(std::memory_order_relaxed) << ",\n";
+        file << "  \"entries\": " << entries_.load(std::memory_order_relaxed) << ",\n";
+        file << "  \"total_size_bytes\": " << total_size_bytes_.load(std::memory_order_relaxed) << ",\n";
+        file << "  \"max_cache_size_bytes\": " << max_cache_size_bytes_.load(std::memory_order_relaxed) << "\n";
+        file << "}\n";
+        file.flush();
+        file.close();
+        
+        // Atomic rename - use platform-specific approach for robustness
+        std::error_code ec;
+#ifdef _WIN32
+        std::wstring wtemp = temp_file.wstring();
+        std::wstring wdest = stats_file_.wstring();
+        if (MoveFileExW(wtemp.c_str(), wdest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            return;
+        }
+        // Fallback to std::filesystem if MoveFileEx fails
+        if (fs::exists(stats_file_)) {
+            fs::remove(stats_file_, ec);
+        }
+        fs::rename(temp_file, stats_file_, ec);
+#else
+        fs::rename(temp_file, stats_file_, ec);
+#endif
     } catch (...) {
         // Ignore errors on destruction
     }
@@ -26,7 +66,8 @@ StatsTracker::~StatsTracker() {
 void StatsTracker::load_from_file() {
     std::lock_guard<std::mutex> lock(file_mutex_);
     
-    if (!fs::exists(stats_file_)) {
+    std::error_code ec;
+    if (!fs::exists(stats_file_, ec)) {
         return;
     }
     
@@ -86,9 +127,22 @@ void StatsTracker::save_to_file() const {
     file.flush();
     file.close();
     
-    // Atomic rename
+    // Atomic rename - use platform-specific approach for robustness
     std::error_code ec;
+#ifdef _WIN32
+    std::wstring wtemp = temp_file.wstring();
+    std::wstring wdest = stats_file_.wstring();
+    if (MoveFileExW(wtemp.c_str(), wdest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return;
+    }
+    // Fallback to std::filesystem if MoveFileEx fails
+    if (fs::exists(stats_file_)) {
+        fs::remove(stats_file_, ec);
+    }
     fs::rename(temp_file, stats_file_, ec);
+#else
+    fs::rename(temp_file, stats_file_, ec);
+#endif
 }
 
 void StatsTracker::record_hit(int64_t time_saved_ms, int64_t bytes_retrieved) {
@@ -196,4 +250,4 @@ void StatsTracker::print_summary() const {
     std::cout << "==============================" << std::endl;
 }
 
-} // namespace remake
+} // namespace skipbuild

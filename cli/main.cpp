@@ -38,16 +38,16 @@ int execute_native_fallback(const std::vector<std::string>& args, const std::str
 void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog << " [options] -- <compiler> [compiler_args...]\n";
     std::cerr << "\n";
-    std::cerr << "remake - C++ build cache (compiler launcher)\n";
+    std::cerr << "skipbuild - C++ build cache (compiler launcher)\n";
     std::cerr << "\n";
     std::cerr << "Modes:\n";
-    std::cerr << "  remake g++ -c foo.cpp -o foo.o     # Wrap compiler (like ccache)\n";
-    std::cerr << "  remake --cache-dir <path>          # Set cache directory\n";
-    std::cerr << "  remake --stats                     # Show cache statistics\n";
-    std::cerr << "  remake --remote-stats              # Show remote cache statistics\n";
-    std::cerr << "  remake --clear-stats               # Reset cache statistics to zero\n";
-    std::cerr << "  remake --clean                     # Clean cache\n";
-    std::cerr << "  remake --version                   # Show version\n";
+    std::cerr << "  skipbuild g++ -c foo.cpp -o foo.o     # Wrap compiler (like ccache)\n";
+    std::cerr << "  skipbuild --cache-dir <path>          # Set cache directory\n";
+    std::cerr << "  skipbuild --stats                     # Show cache statistics\n";
+    std::cerr << "  skipbuild --remote-stats              # Show remote cache statistics\n";
+    std::cerr << "  skipbuild --clear-stats               # Reset cache statistics to zero\n";
+    std::cerr << "  skipbuild --clean                     # Clean cache\n";
+    std::cerr << "  skipbuild --version                   # Show version\n";
     std::cerr << "\n";
     std::cerr << "Options:\n";
     std::cerr << "  --remote-url <url>        Remote cache endpoint (e.g., http://cache:8080)\n";
@@ -63,8 +63,8 @@ void print_usage(const char* prog) {
     std::cerr << "  BUILDCACHE_REMOTE_URL       Remote cache endpoint\n";
     std::cerr << "  BUILDCACHE_REMOTE_READ_ONLY Remote read-only (true/false)\n";
     std::cerr << "  BUILDCACHE_REMOTE_TIMEOUT   Remote timeout in ms\n";
-    std::cerr << "  REMAKE_DISABLE=1            Disable cache (passthrough)\n";
-    std::cerr << "  REMAKE_DEBUG=1              Debug logging\n";
+    std::cerr << "  SKIPBUILD_DISABLE=1            Disable cache (passthrough)\n";
+    std::cerr << "  SKIPBUILD_DEBUG=1              Debug logging\n";
     std::cerr << "\n";
     std::cerr << "Config file (.buildcache.conf):\n";
     std::cerr << "  max_cache_size = 10G\n";
@@ -74,13 +74,13 @@ void print_usage(const char* prog) {
     std::cerr << "  remote_url = http://...\n";
 }
 
-remake::CacheConfig load_cache_config(const fs::path& project_root = "") {
+skipbuild::CacheConfig load_cache_config(const fs::path& project_root = "") {
     // Check for explicit CLI cache dir override
-    std::optional<remake::CacheConfig> cli_overrides;
+    std::optional<skipbuild::CacheConfig> cli_overrides;
     
     // Parse command line for --cache-dir (will be handled later in main)
     // For now, just load with full precedence
-    return remake::ConfigParser::load_config(project_root, cli_overrides);
+    return skipbuild::ConfigParser::load_config(project_root, cli_overrides);
 }
 
 // Windows: find compiler in PATH
@@ -119,12 +119,12 @@ int run_compiler(const std::vector<std::string>& args) {
 }
 
 int main(int argc, char* argv[]) {
-    // Handle remake-specific commands first
+    // Handle skipbuild-specific commands first
     if (argc >= 2) {
         std::string arg1 = argv[1];
         
         if (arg1 == "--version" || arg1 == "-V") {
-            std::cout << "remake 0.1.0" << std::endl;
+            std::cout << "skipbuild 0.1.0" << std::endl;
             return 0;
         }
         if (arg1 == "--help" || arg1 == "-h") {
@@ -134,7 +134,7 @@ int main(int argc, char* argv[]) {
     }
     
     // Parse CLI args for config overrides before processing commands
-    std::optional<remake::CacheConfig> cli_overrides;
+    std::optional<skipbuild::CacheConfig> cli_overrides;
     fs::path cli_cache_dir;
     std::vector<bool> arg_consumed(argc, false);  // Track consumed arguments
     
@@ -145,37 +145,37 @@ int main(int argc, char* argv[]) {
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--max-cache-size" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = remake::CacheConfig{};
-            cli_overrides->max_cache_size_bytes = remake::ConfigParser::parse_size(argv[++i]);
+            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
+            cli_overrides->max_cache_size_bytes = skipbuild::ConfigParser::parse_size(argv[++i]);
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--max-age" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = remake::CacheConfig{};
+            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
             try { cli_overrides->max_age_days = std::stoi(argv[++i]); } catch (...) {}
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--compression" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = remake::CacheConfig{};
-            cli_overrides->compression_enabled = remake::ConfigParser::parse_bool(argv[++i]);
+            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
+            cli_overrides->compression_enabled = skipbuild::ConfigParser::parse_bool(argv[++i]);
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--read-only" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = remake::CacheConfig{};
-            cli_overrides->read_only = remake::ConfigParser::parse_bool(argv[++i]);
+            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
+            cli_overrides->read_only = skipbuild::ConfigParser::parse_bool(argv[++i]);
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--remote-url" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = remake::CacheConfig{};
+            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
             cli_overrides->remote_url = argv[++i];
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--remote-read-only" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = remake::CacheConfig{};
-            cli_overrides->read_only = remake::ConfigParser::parse_bool(argv[++i]);
+            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
+            cli_overrides->read_only = skipbuild::ConfigParser::parse_bool(argv[++i]);
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--remote-timeout" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = remake::CacheConfig{};
+            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
             try { cli_overrides->remote_connect_timeout_ms = std::stoi(argv[++i]); } catch (...) {}
             cli_overrides->remote_read_timeout_ms = cli_overrides->remote_connect_timeout_ms;
             arg_consumed[i] = true;
@@ -184,7 +184,7 @@ int main(int argc, char* argv[]) {
     }
     
     // Load config with precedence
-    auto config = remake::ConfigParser::load_config("", cli_overrides);
+    auto config = skipbuild::ConfigParser::load_config("", cli_overrides);
     if (!cli_cache_dir.empty()) {
         config.cache_dir = cli_cache_dir;
     }
@@ -200,14 +200,14 @@ int main(int argc, char* argv[]) {
     int filtered_argc = static_cast<int>(filtered_argv.size());
     char** filtered_argv_data = filtered_argv.data();
     
-    // Handle remake-specific commands using filtered argv
+    // Handle skipbuild-specific commands using filtered argv
     std::string arg1 = "";
     if (filtered_argc >= 2) {
         arg1 = filtered_argv_data[1];
     }
     
     if (arg1 == "--version" || arg1 == "-V") {
-        std::cout << "remake 0.1.0" << std::endl;
+        std::cout << "skipbuild 0.1.0" << std::endl;
         return 0;
     }
     if (arg1 == "--help" || arg1 == "-h") {
@@ -215,12 +215,12 @@ int main(int argc, char* argv[]) {
         return 0;
     }
     if (arg1 == "--stats") {
-        auto cache = remake::Cache(config.cache_dir, config);
+        auto cache = skipbuild::Cache(config.cache_dir, config);
         cache.print_stats();
         return 0;
     }
     if (arg1 == "--clear-stats" || arg1 == "--zero-stats") {
-        auto cache = remake::Cache(config.cache_dir, config);
+        auto cache = skipbuild::Cache(config.cache_dir, config);
         cache.clear_stats();
         std::cout << "Cache statistics cleared." << std::endl;
         return 0;
@@ -231,7 +231,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
     if (arg1 == "--remote-stats") {
-        auto cache = remake::Cache(config.cache_dir, config);
+        auto cache = skipbuild::Cache(config.cache_dir, config);
         auto rstats = cache.get_remote_stats();
         std::cout << "=== Remote Cache Statistics ===\n";
         std::cout << "Remote Hits:    " << rstats.remote_hits << "\n";
@@ -257,7 +257,7 @@ int main(int argc, char* argv[]) {
     }
     
     // Check for disable
-    if (std::getenv("REMAKE_DISABLE")) {
+    if (std::getenv("SKIPBUILD_DISABLE")) {
         std::vector<std::string> args(filtered_argv_data + 1, filtered_argv_data + filtered_argc);
         return run_compiler(args) ? 0 : 1;
     }
@@ -276,7 +276,7 @@ int main(int argc, char* argv[]) {
     char** compiler_argv;
     
     if (sep == -1) {
-        // No separator - treat as compiler wrapper: remake g++ -c foo.cpp
+        // No separator - treat as compiler wrapper: skipbuild g++ -c foo.cpp
         if (filtered_argc < 3) {
             print_usage(filtered_argv_data[0]);
             return 1;
@@ -285,7 +285,7 @@ int main(int argc, char* argv[]) {
         compiler_argc = filtered_argc - 1;
         compiler_argv = filtered_argv_data + 1;
     } else {
-        // With separator: remake -- g++ -c foo.cpp
+        // With separator: skipbuild -- g++ -c foo.cpp
         compiler_start = sep + 1;
         compiler_argc = filtered_argc - compiler_start;
         compiler_argv = filtered_argv_data + compiler_start;
@@ -302,41 +302,41 @@ int main(int argc, char* argv[]) {
     compiler_argv[0] = const_cast<char*>(cmd_full.c_str());
     
     // Debug logging
-    bool debug = std::getenv("REMAKE_DEBUG");
+    bool debug = std::getenv("SKIPBUILD_DEBUG");
     
     // Detect if this is a linker command
-    auto linker_type = remake::detect_linker_type(cmd_full);
-    bool is_linker = (linker_type != remake::LinkerType::Unknown);
+    auto linker_type = skipbuild::detect_linker_type(cmd_full);
+    bool is_linker = (linker_type != skipbuild::LinkerType::Unknown);
     
     if (is_linker) {
         // Handle linker command
-        auto link_cmd = remake::parse_linker_command(compiler_argc, compiler_argv);
+        auto link_cmd = skipbuild::parse_linker_command(compiler_argc, compiler_argv);
         if (!link_cmd) {
             std::vector<std::string> args(compiler_argv, compiler_argv + compiler_argc);
             return run_compiler(args);
         }
         
         if (debug) {
-            std::cerr << "[remake] Linker: " << link_cmd->linker_path << " (" << link_cmd->linker_hash.substr(0, 8) << ")\n";
-            std::cerr << "[remake] Output: " << link_cmd->output << "\n";
-            std::cerr << "[remake] Inputs: " << link_cmd->inputs.size() << "\n";
+            std::cerr << "[skipbuild] Linker: " << link_cmd->linker_path << " (" << link_cmd->linker_hash.substr(0, 8) << ")\n";
+            std::cerr << "[skipbuild] Output: " << link_cmd->output << "\n";
+            std::cerr << "[skipbuild] Inputs: " << link_cmd->inputs.size() << "\n";
         }
         
         // Get cache
-        auto cache = remake::Cache(config.cache_dir, config);
+        auto cache = skipbuild::Cache(config.cache_dir, config);
         
         // Compute linker key
-        auto key = remake::compute_linker_key(*link_cmd);
+        auto key = skipbuild::compute_linker_key(*link_cmd);
         
         if (debug) {
-            std::cerr << "[remake] Linker Key: " << key.hash.substr(0, 16) << "\n";
+            std::cerr << "[skipbuild] Linker Key: " << key.hash.substr(0, 16) << "\n";
         }
         
         // Check cache with safe_get (fail-safe)
         auto entry = cache.safe_get(key);
         if (entry) {
-            if (debug) std::cerr << "[remake] LINKER CACHE HIT\n";
-            std::cout << "[remake] LINK HIT " << key.hash.substr(0, 12) << "\n";
+            if (debug) std::cerr << "[skipbuild] LINKER CACHE HIT\n";
+            std::cout << "[skipbuild] LINK HIT " << key.hash.substr(0, 12) << "\n";
             
             // Restore output file(s)
             bool restore_ok = true;
@@ -345,18 +345,18 @@ int main(int argc, char* argv[]) {
                 fs::copy_file(cached_out, link_cmd->output, fs::copy_options::overwrite_existing, ec);
                 if (ec) {
                     restore_ok = false;
-                    if (debug) std::cerr << "[remake] Failed to restore: " << ec.message() << "\n";
+                    if (debug) std::cerr << "[skipbuild] Failed to restore: " << ec.message() << "\n";
                 }
-                if (debug) std::cerr << "[remake] Restored: " << link_cmd->output << "\n";
+                if (debug) std::cerr << "[skipbuild] Restored: " << link_cmd->output << "\n";
             }
             if (restore_ok) return 0;
             // If restore failed, fall through to native execution
-            if (debug) std::cerr << "[remake] Cache restore failed, falling back to native linker\n";
+            if (debug) std::cerr << "[skipbuild] Cache restore failed, falling back to native linker\n";
         }
         
         // Cache miss or restore failed - link natively
-        if (debug) std::cerr << "[remake] LINKER CACHE MISS\n";
-        std::cout << "[remake] LINK MISS " << key.hash.substr(0, 12) << " -> linking...\n";
+        if (debug) std::cerr << "[skipbuild] LINKER CACHE MISS\n";
+        std::cout << "[skipbuild] LINK MISS " << key.hash.substr(0, 12) << " -> linking...\n";
         
         auto start = std::chrono::high_resolution_clock::now();
         std::vector<std::string> args(compiler_argv, compiler_argv + compiler_argc);
@@ -365,11 +365,11 @@ int main(int argc, char* argv[]) {
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
         
         if (exit_code != 0) {
-            std::cerr << "[remake] Linking failed with exit code " << exit_code << "\n";
+            std::cerr << "[skipbuild] Linking failed with exit code " << exit_code << "\n";
             return exit_code;
         }
         
-        if (debug) std::cerr << "[remake] Linked in " << ms << "ms\n";
+        if (debug) std::cerr << "[skipbuild] Linked in " << ms << "ms\n";
         
         // Record direct execute for stats (fallback linking)
         cache.record_direct_execute();
@@ -387,7 +387,7 @@ int main(int argc, char* argv[]) {
         }
         if (!outputs.empty()) {
             cache.safe_put(key, outputs);
-            if (debug) std::cerr << "[remake] Stored in cache (" << outputs.size() << " files)\n";
+            if (debug) std::cerr << "[skipbuild] Stored in cache (" << outputs.size() << " files)\n";
         }
         
         return 0;
@@ -395,13 +395,13 @@ int main(int argc, char* argv[]) {
     
     // Compiler command
     // Get actual dependencies using compiler -MMD
-    auto deps = remake::get_dependencies(compiler_argv, compiler_argc);
+    auto deps = skipbuild::get_dependencies(compiler_argv, compiler_argc);
     if (debug) {
-        std::cerr << "[remake] Dependencies found: " << deps.size() << "\n";
-        for (auto& d : deps) std::cerr << "[remake]   " << d << "\n";
+        std::cerr << "[skipbuild] Dependencies found: " << deps.size() << "\n";
+        for (auto& d : deps) std::cerr << "[skipbuild]   " << d << "\n";
     }
     
-    auto cmd = remake::parse_compile_command(compiler_argc, compiler_argv);
+    auto cmd = skipbuild::parse_compile_command(compiler_argc, compiler_argv);
     if (!cmd) {
         // Not a compile command we understand, passthrough
         std::vector<std::string> args(compiler_argv, compiler_argv + compiler_argc);
@@ -422,24 +422,24 @@ int main(int argc, char* argv[]) {
     }
     
     // Get cache
-    auto cache = remake::Cache(config.cache_dir, config);
+    auto cache = skipbuild::Cache(config.cache_dir, config);
     
     // Compute key
-    auto key = remake::Cache::compute_key_from_command(*cmd);
+    auto key = skipbuild::Cache::compute_key_from_command(*cmd);
     
     // Debug logging
     if (debug) {
-        std::cerr << "[remake] Source: " << cmd->source << "\n";
-        std::cerr << "[remake] Output: " << cmd->output << "\n";
-        std::cerr << "[remake] Key: " << key.hash.substr(0, 16) << "\n";
-        std::cerr << "[remake] Compiler: " << cmd->compiler_path << " (" << cmd->compiler_hash.substr(0, 8) << ")\n";
+        std::cerr << "[skipbuild] Source: " << cmd->source << "\n";
+        std::cerr << "[skipbuild] Output: " << cmd->output << "\n";
+        std::cerr << "[skipbuild] Key: " << key.hash.substr(0, 16) << "\n";
+        std::cerr << "[skipbuild] Compiler: " << cmd->compiler_path << " (" << cmd->compiler_hash.substr(0, 8) << ")\n";
     }
     
     // Check cache with safe_get (fail-safe)
     auto entry = cache.safe_get(key);
     if (entry) {
-        if (debug) std::cerr << "[remake] CACHE HIT\n";
-        std::cout << "[remake] HIT " << key.hash.substr(0, 12) << "\n";
+        if (debug) std::cerr << "[skipbuild] CACHE HIT\n";
+        std::cout << "[skipbuild] HIT " << key.hash.substr(0, 12) << "\n";
         
         // Restore output file(s)
         bool restore_ok = true;
@@ -454,33 +454,33 @@ int main(int argc, char* argv[]) {
             fs::copy_file(cached_out, target, fs::copy_options::overwrite_existing, ec);
             if (ec) {
                 restore_ok = false;
-                if (debug) std::cerr << "[remake] Failed to restore: " << ec.message() << "\n";
+                if (debug) std::cerr << "[skipbuild] Failed to restore: " << ec.message() << "\n";
             }
-            if (debug) std::cerr << "[remake] Restored: " << target << "\n";
+            if (debug) std::cerr << "[skipbuild] Restored: " << target << "\n";
         }
         
         // Restore sidecar files
         for (auto& sidecar : entry->sidecars) {
             fs::path target = sidecar.original_path.empty() ? 
                 (cmd->output.parent_path() / sidecar.relative_path.filename()) : 
-                sidecar.original_path;
+                fs::path(sidecar.original_path);
             std::error_code ec;
             fs::copy_file(sidecar.relative_path, target, fs::copy_options::overwrite_existing, ec);
             if (ec) {
                 restore_ok = false;
-                if (debug) std::cerr << "[remake] Failed to restore sidecar: " << ec.message() << "\n";
+                if (debug) std::cerr << "[skipbuild] Failed to restore sidecar: " << ec.message() << "\n";
             }
-            if (debug) std::cerr << "[remake] Restored sidecar: " << target << "\n";
+            if (debug) std::cerr << "[skipbuild] Restored sidecar: " << target << "\n";
         }
         
         if (restore_ok) return 0;
         // If restore failed, fall through to native execution
-        if (debug) std::cerr << "[remake] Cache restore failed, falling back to native compiler\n";
+        if (debug) std::cerr << "[skipbuild] Cache restore failed, falling back to native compiler\n";
     }
     
     // Cache miss or restore failed - compile natively
-    if (debug) std::cerr << "[remake] CACHE MISS\n";
-    std::cout << "[remake] MISS " << key.hash.substr(0, 12) << " -> compiling...\n";
+    if (debug) std::cerr << "[skipbuild] CACHE MISS\n";
+    std::cout << "[skipbuild] MISS " << key.hash.substr(0, 12) << " -> compiling...\n";
     
     auto start = std::chrono::high_resolution_clock::now();
     std::vector<std::string> args(compiler_argv, compiler_argv + compiler_argc);
@@ -489,27 +489,27 @@ int main(int argc, char* argv[]) {
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     
     if (exit_code != 0) {
-        std::cerr << "[remake] Compilation failed with exit code " << exit_code << "\n";
+        std::cerr << "[skipbuild] Compilation failed with exit code " << exit_code << "\n";
         return exit_code;
     }
     
-    if (debug) std::cerr << "[remake] Compiled in " << ms << "ms\n";
+    if (debug) std::cerr << "[skipbuild] Compiled in " << ms << "ms\n";
     
     // Record direct execute for stats (fallback compilation)
     cache.record_direct_execute();
     
     // Store in cache with safe_put (fail-safe)
     std::vector<fs::path> outputs;
-    std::vector<std::pair<fs::path, remake::SidecarType>> sidecars;
+    std::vector<std::pair<fs::path, skipbuild::SidecarType>> sidecars;
     
     if (fs::exists(cmd->output)) {
         outputs.push_back(cmd->output);
     }
     
     // Also cache PCH file if creating one
-    if (cmd->pch.mode == remake::PCHMode::Create && !cmd->pch.pch_output.empty() && fs::exists(cmd->pch.pch_output)) {
+    if (cmd->pch.mode == skipbuild::PCHMode::Create && !cmd->pch.pch_output.empty() && fs::exists(cmd->pch.pch_output)) {
         outputs.push_back(cmd->pch.pch_output);
-        if (debug) std::cerr << "[remake] Caching PCH: " << cmd->pch.pch_output << "\n";
+        if (debug) std::cerr << "[skipbuild] Caching PCH: " << cmd->pch.pch_output << "\n";
     }
     
     // Collect debug sidecar files if debug info was requested
@@ -518,14 +518,14 @@ int main(int argc, char* argv[]) {
             fs::path sidecar_path = cmd->expected_sidecars[i];
             if (fs::exists(sidecar_path)) {
                 sidecars.emplace_back(sidecar_path, cmd->expected_sidecar_types[i]);
-                if (debug) std::cerr << "[remake] Caching sidecar: " << sidecar_path << "\n";
+                if (debug) std::cerr << "[skipbuild] Caching sidecar: " << sidecar_path << "\n";
             }
         }
     }
     
     if (!outputs.empty()) {
         cache.safe_put(key, outputs, sidecars);
-        if (debug) std::cerr << "[remake] Stored in cache (" << outputs.size() << " outputs, " << sidecars.size() << " sidecars)\n";
+        if (debug) std::cerr << "[skipbuild] Stored in cache (" << outputs.size() << " outputs, " << sidecars.size() << " sidecars)\n";
     }
     
     return 0;

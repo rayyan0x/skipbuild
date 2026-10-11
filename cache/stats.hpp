@@ -8,7 +8,7 @@
 #include <fstream>
 
 namespace fs = std::filesystem;
-namespace remake {
+namespace skipbuild {
 
 struct CacheStats {
     int64_t hits = 0;

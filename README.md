@@ -1,116 +1,172 @@
 # skipbuild
 
-**Zero-dependency, cross-platform C++ build cache designed to eliminate 40+ minute compilation bottlenecks.**
+[![Build and Test](https://github.com/rayyan0x/skipbuild/workflows/Build%20and%20Test/badge.svg)](https://github.com/rayyan0x/skipbuild/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[![Build Status](https://github.com/rayyan0x/skipbuild/workflows/Build%20and%20Test/badge.svg)](https://github.com/rayyan0x/skipbuild/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/rayyan0x/skipbuild/releases)
-[![Release](https://img.shields.io/github/v/release/rayyan0x/skipbuild?include_prereleases)](https://github.com/rayyan0x/skipbuild/releases)
+**A zero-setup, cross-platform C++ build cache that makes rebuilds near-instant, on Windows, Linux, and macOS.**
 
----
-
-## Why skipbuild? (vs ccache & sccache)
-
-| Scenario | Without Cache | ccache | sccache | **skipbuild** |
-|----------|---------------|--------|---------|---------------|
-| **Change one `.cpp`** | Recompile all | Recompile one | Recompile one | **Recompile one** |
-| **Switch git branches** | Full rebuild | Full rebuild | Full rebuild | **Restore cached objects** |
-| **CI pipeline (500 files)** | 15 min | 3-5 min | 2-4 min | **~30 sec** |
-| **MSVC `/Zi` PDB support** | ✅ | ❌ Limited | ⚠️ Experimental | **✅ Native .pdb + .idb tracking** |
-| **Remote cache (HTTP/S3)** | ❌ | ❌ | ✅ (S3/GCS/Azure) | **✅ Native HTTP + S3-compatible** |
-| **Cross-platform single binary** | — | ❌ Separate builds | ✅ | **✅ Zero-dep, all platforms** |
-| **Zero external dependencies** | — | ❌ (needs zlib) | ❌ (needs OpenSSL, zstd) | **✅ WinCrypto / POSIX sockets** |
-| **Windows-first design** | — | ❌ Linux-first | ⚠️ Works | **✅ Native WinHTTP, `/Zi`, `cl.exe`** |
-| **Compiler detection** | — | Binary name | Binary name | **Binary hash + version** |
-| **Fail-safe on corruption** | — | Manual clean | Manual clean | **Auto-purge + native fallback** |
-| **Config via env/file/CLI** | — | Env only | Env + config file | **Env + file + CLI (precedence)** |
+skipbuild wraps your compiler, hashes everything that affects the output, and restores previously built objects when the inputs have not changed. It is designed to eliminate the 40+ minute compilation bottlenecks that slow down large C++ projects.
 
 ---
 
-**Real-world benchmark:** 50 files × 10 headers, `-O2 -std=c++20`
-- **Cold build:** 22.0s → **Hot rebuild:** 0.2s = **103x faster**
-- Overhead on cache miss: ~4ms per file (<1%)
+## Benchmark
 
----
+Measured locally on a project of **50 source files, each including 10 headers**, compiled with `-O2 -std=c++20`.
 
-### Extended Scenarios Where skipbuild Wins
+| Scenario | Time |
+|---|---|
+| Cold build (no cache) | 22.0 s |
+| Hot rebuild (all cache hits) | 0.2 s |
+| **Speedup** | **~110x** |
+| Overhead per file on cache miss | ~4 ms (<1% of compile time) |
 
-| Scenario | ccache | sccache | skipbuild |
-|----------|--------|---------|-----------|
-| **Windows team using MSVC + PDB** | ❌ Loses debug info | ⚠️ Loses `.pdb` | ✅ Full `.pdb` + `.idb` restore |
-| **Mixed Windows/Linux CI** | Separate caches | Shared (complex setup) | **Single config, native HTTP on both** |
-| **Air-gapped / offline build** | ✅ | ❌ Needs cloud | ✅ **Local-only by default** |
-| **No root / no install permissions** | ❌ Needs install | ❌ Needs install | ✅ **Single binary, drop in PATH** |
-| **Deterministic keys across machines** | ⚠️ Path issues | ✅ | **✅ Build-root normalization** |
-| **Large monorepo (10k+ files)** | Slow stat() scans | ✅ | ✅ **Content-hash only** |
-| **Compiler upgrades** | Cache invalidation manual | Manual | **Auto-detect via binary hash** |
-| **Distributed team (remote cache)** | NFS only (slow) | Cloud only | **HTTP/S3 + read-only CI mode** |
+**Hardware, OS, compiler version:** Windows 11, MSVC 19.51 / Linux (Ubuntu 24.04, GCC 13.3) / macOS 26 (Apple Clang 21)
 
----
-
-### Why Not Just Use ccache/sccache?
-
-- **ccache**: Excellent for GCC/Clang on Linux/macOS. **Fails on MSVC** — doesn't understand `/Zi`, `.pdb`, `.idb`, `/Fo`, `cl.exe` semantics.
-- **sccache**: Great for distributed Rust/C++ with cloud storage. **Heavy dependencies** (OpenSSL, zstd, async runtime). **MSVC support is experimental** — PDB handling unreliable.
-- **skipbuild**: **Built for MSVC first**, zero dependencies, single 3MB binary, works identically on Windows/Linux/macOS. If you're on Windows with Visual Studio, this is the only one that "just works" with full debug info fidelity.
-
----
-
-### When to Use What
-
-| Use Case | Recommended |
-|----------|-------------|
-| Linux-only GCC/Clang, local cache | **ccache** (mature, fast) |
-| Distributed team, cloud storage (S3/GCS), Rust+C++ | **sccache** |
-| **Windows MSVC, or mixed Win/Linux, or zero-dep requirement** | **skipbuild** |
-| Team wants single binary, no config, works offline + online | **skipbuild** |
-
----
-
-**Real-world benchmark:** 50 files × 10 headers, `-O2 -std=c++20`
-- **Cold build:** 22.0s → **Hot rebuild:** 0.2s = **103x faster**
-- Overhead on cache miss: ~4ms per file (<1%)
-
----
-
-## Key Features
-
-- 🚀 **Zero external dependencies** — Single static binary (`~3MB`), no runtime deps
-- 🪟 **Native MSVC support** — Full `/Zi` PDB + `.idb` sidecar tracking
-- 📦 **Remote HTTP/S3 caching** — Team-shared cache via `BUILDCACHE_REMOTE_URL`
-- 🐧 **Cross-platform** — Windows (WinHTTP), Linux/macOS (POSIX sockets)
-- 🔒 **Content-addressable keys** — SHA-256 of source + includes + flags + compiler hash
-- 📦 **Zstd compression** — Artifacts compressed locally (~70% size reduction)
-- 🛡️ **Fail-safe design** — Cache corruption = automatic purge + native fallback
-- 🔧 **Works with any build system** — CMake, Make, Ninja, VS, Bazel, plain scripts
-
----
-
-## Quick Start
-
-### Download Prebuilt Binary
+Reproduce it:
 
 ```bash
-# Linux/macOS
-curl -fsSL https://github.com/rayyan0x/skipbuild/releases/latest/download/skipbuild-linux-amd64.tar.gz | tar -xz
-sudo cp skipbuild /usr/local/bin/
-
-# Windows (PowerShell)
-irm https://github.com/rayyan0x/skipbuild/releases/latest/download/skipbuild-windows-amd64.zip | Expand-Archive
-copy skipbuild.exe C:\Windows\
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
+# Cold run: clear the cache, then time the build
+# Hot run: rebuild without changes, then time it
 ```
 
-### Build From Source
+---
+
+## Feature comparison
+
+| Scenario | No cache | ccache | sccache | skipbuild |
+|---|---|---|---|---|
+| Change one `.cpp` | Recompile all | Recompile one | Recompile one | Recompile one |
+| Switch git branches | Full rebuild | Full rebuild | Full rebuild | Restore cached objects |
+| MSVC `/Zi` PDB support | — | Limited | Experimental | Native `.pdb` + `.idb` tracking |
+| Remote cache | — | — | S3/GCS/Azure | HTTP/S3-compatible |
+| Zero external dependencies | — | Needs zlib | Needs OpenSSL, zstd | WinCrypto / POSIX sockets |
+| Windows-first design | — | Linux-first | Works | Native WinHTTP, `/Zi`, `cl.exe` |
+| Fail-safe on corruption | — | Manual clean | Manual clean | Auto-purge + native fallback |
+
+---
+
+## Features
+
+### Caching
+- **Content-addressable keys:** SHA-256 over source content, normalized include paths, sorted flags, compiler hash, compiler type, and relevant environment variables.
+- **Deterministic keys:** the same inputs produce the same key across machines and operating systems.
+- **Build-root normalization:** paths are normalized relative to the build root, with forward slashes and case handling on Windows.
+- **Compiler-aware invalidation:** the compiler binary hash and version string are captured automatically, so a compiler upgrade invalidates the cache.
+- **Local storage:** two-level hash sharding (`aa/bb/<hash>/`), configurable location (default `~/.cache/buildcache`).
+- **Eviction:** size limit (default 5 GB, target 85%), LRU, and max age (default 30 days).
+- **Atomic writes:** temp file, then `MoveFileExW` on Windows or `rename()` on POSIX.
+- **Corruption handling:** zero-byte files, missing metadata, and corrupted zstd data are purged on access.
+
+### Compiler support
+- **MSVC (`cl.exe`):** `/Zi` PDB, `.idb`, `/Fo`, `/I`, `/std:`, `/O`, `/W`.
+- **GCC and Clang:** `-std=`, `-O`, `-g`, `-I`, `-fPIC`, `-gsplit-dwarf` (`.dwo`).
+- **Precompiled headers:** detects `/Yc`, `/Yu`, `-x c++-header`, and `-include`.
+- **Sidecar files:** `.pdb`, `.idb`, `.dwo`, and arbitrary sidecars.
+
+### Compression
+- Zstd level 3, roughly 70% size reduction on object files.
+- Zstd is fetched and built automatically at configure time if not installed, so no manual setup is needed.
+
+### Remote cache
+- HTTP and S3-compatible storage (AWS S3, MinIO) via presigned URLs and SigV4.
+- Fail-fast timeouts: 3 s connect and read by default, one retry, immediate fallback on 5xx.
+- Read-only mode for CI replicas.
+- **Zero external dependencies:** uses WinHTTP on Windows, POSIX sockets on Linux/macOS — no cURL/OpenSSL required.
+
+### Resilience
+- **Transparent fallback:** any cache error logs a warning and runs the native compiler.
+- **Cache is advisory:** the compiler always runs on a miss. A broken cache never blocks a build.
+- **Remote timeout to local fallback:** an unreachable remote cache falls back to local cache or a native compile.
+- **Read-only mode:** `BUILDCACHE_READ_ONLY` / `--read-only` for CI read-only replicas.
+
+### Configuration
+Priority: CLI flags, then environment variables, then config file.
+
+| Source | Example |
+|---|---|
+| Config file | `.buildcache.conf` or `~/.config/buildcache/config` |
+| Environment | `BUILDCACHE_DIR`, `BUILDCACHE_MAX_SIZE=10G`, `BUILDCACHE_REMOTE_URL` |
+| CLI | `--cache-dir`, `--max-cache-size`, `--remote-url`, `--stats`, `--clean` |
+
+### Integration
+- **CMake:** `set(CMAKE_CXX_COMPILER_LAUNCHER "skipbuild")`
+- **Make / Ninja:** `CXX := skipbuild g++`
+- **Visual Studio:** Project → C/C++ → Command Line → Additional Options: `skipbuild -- %(AdditionalOptions)`
+- **Any build system:** `skipbuild -- clang++ -c foo.cpp -o foo.o`
+
+### Statistics
+- Local: hits, misses, hit rate, bytes and time saved, entry count, total size.
+- Remote: hits, misses, uploads, downloads, errors.
+- Commands: `--stats`, `--remote-stats`, `--clear-stats`, `--clean`.
+
+---
+
+## Installation
+
+### Requirements
+- CMake 3.20 or newer
+- A C++20 compiler: MSVC 2019+ (19.20+), GCC 11+, or Clang 13+
+- Internet access at configure time only if zstd is not already installed (it is downloaded from GitHub)
+
+### Build from source
 
 ```bash
 git clone https://github.com/rayyan0x/skipbuild.git
 cd skipbuild
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-# Binary at build/Release/skipbuild.exe (Windows) or build/skipbuild (Linux/macOS)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
 ```
 
-### Basic Usage
+The binary is at `build/skipbuild` on Linux and macOS, and `build/Release/skipbuild.exe` on Windows (Visual Studio generator).
+
+### Install
+
+```bash
+cmake --install build --config Release
+```
+
+Default install prefix: `/usr/local` on Unix, `C:\Program Files\skipbuild` on Windows.
+
+---
+
+## Testing
+
+```bash
+ctest --test-dir build -C Release --output-on-failure --timeout 120
+```
+
+| Test | Covers |
+|---|---|
+| `cache_test` | Basic put and get, key determinism |
+| `concurrent_test` | Multi-threaded cache access |
+| `multiprocess_test` | Multi-process locking |
+| `eviction_test` | LRU, age, and size-based eviction |
+| `simple_test` | Basic workflow |
+| `sidecar_test` | PDB, IDB, and DWO sidecar tracking |
+| `cache_key_determinism_test` | Cross-machine key equality |
+| `resiliency_test` | Corruption, permission failures, network failures |
+| `config_test` | Config file, environment, and CLI precedence |
+| `stats_test` | Statistics tracking |
+
+Current CI status: all three platforms (Windows, Linux, macOS) pass.
+
+---
+
+## Platform support
+
+| Platform | Compiler | Status |
+|---|---|---|
+| Windows | MSVC 2019+ | ✅ |
+| Linux | GCC 11+, Clang 13+ | ✅ |
+| macOS | Apple Clang 13+ | ✅ |
+
+---
+
+## Usage
+
+### Basic Usage (compiler wrapper)
 
 ```bash
 # Wrap compiler (ccache-style)
@@ -123,75 +179,30 @@ skipbuild -- g++ -c src/main.cpp -o build/main.o -Iinclude -O2
 skipbuild -- cl.exe /c src/main.cpp /Fobuild/main.obj /Zi /Iinclude
 ```
 
----
+### CLI Commands
 
-## How It Works
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        COMPILATION REQUEST                       │
-│         skipbuild g++ -c main.cpp -o main.o -Iinclude           │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    CONTENT-ADDRESSABLE KEY                       │
-│  SHA-256( source_hash | normalized_paths | sorted_flags |       │
-│             compiler_hash | compiler_type | relevant_env )      │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │
-               ┌───────────────┴───────────────┐
-               ▼                               ▼
-     ┌───────────────────┐            ┌───────────────────┐
-     │   LOCAL CACHE     │            │   REMOTE CACHE    │
-     │  ~/.cache/skipbuild  │            │  HTTP/S3 endpoint │
-     │  (Zstd compressed) │            │  (team-shared)    │
-     └─────────┬───────────┘            └─────────┬───────────┘
-               │                               │
-               └───────────────┬───────────────┘
-                               ▼
-                    ┌────────────────────┐
-                    │   CACHE HIT        │ ──► Restore .o/.obj + .pdb/.dwo
-                    │   CACHE MISS       │ ──► Run compiler natively
-                    │                    │     Store artifacts to cache
-                    └────────────────────┘
+```bash
+skipbuild --stats              # Show local cache statistics
+skipbuild --remote-stats       # Show remote cache statistics
+skipbuild --clear-stats        # Reset cache statistics to zero
+skipbuild --clean              # Remove all cache entries
+skipbuild --cache-dir /path    # Print cache directory
+skipbuild --version            # Show version
+skipbuild --help               # Show help
 ```
 
-**Cache Key Determinism:**
-- Source file content hash
-- Normalized include paths (build-root relative, forward slashes, lowercase on Windows)
-- Sorted compiler flags
-- Compiler binary hash + version
-- Relevant environment variables (`CXXFLAGS`, `INCLUDE`, `CPATH`, etc.)
+### Remote Cache Options
 
-**Fail-Safe Guarantees:**
-- Cache read/write errors → logged warning + native compilation
-- Corrupted cache entries → auto-purged on next access
-- Remote cache timeout (3s default) → instant fallback to local/native
-- No build is ever blocked by the cache
+```bash
+skipbuild --remote-url http://cache:8080
+skipbuild --remote-read-only
+skipbuild --remote-timeout 5000
+```
 
----
+### Configuration (Priority: CLI > Environment > Config File)
 
-## Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BUILDCACHE_DIR` | `~/.cache/skipbuild` | Cache directory |
-| `BUILDCACHE_MAX_SIZE` | `5G` | Max cache size (e.g., `10G`, `500M`) |
-| `BUILDCACHE_MAX_AGE` | `30` | Max entry age in days |
-| `BUILDCACHE_COMPRESSION` | `true` | Enable Zstd compression |
-| `BUILDCACHE_READ_ONLY` | `false` | Read-only cache mode |
-| `BUILDCACHE_REMOTE_URL` | — | Remote cache endpoint (e.g., `http://cache:8080`) |
-| `BUILDCACHE_REMOTE_READ_ONLY` | `false` | Remote read-only mode |
-| `BUILDCACHE_REMOTE_TIMEOUT` | `3000` | Connect/read timeout (ms) |
-| `BUILDCACHE_REMOTE_AUTH_HEADER` | — | Custom `Authorization` header |
-
-### Config File (`.buildcache.conf`)
-
+**Config file** (`.buildcache.conf` in project root or `~/.config/buildcache/config`):
 ```ini
-# Project or global config (~/.config/skipbuild/config)
 max_cache_size = 10G
 cache_dir = /path/to/cache
 compression_enabled = true
@@ -203,75 +214,33 @@ remote_read_timeout_ms = 3000
 remote_max_retries = 1
 ```
 
-### CLI Flags
-
+**Environment variables:**
 ```bash
-skipbuild [options] -- <compiler> [args...]
-
-Options:
-  --cache-dir <path>         Override cache directory
-  --max-cache-size <size>    Max cache size (e.g., 10G)
-  --max-age <days>           Max entry age
-  --compression <on|off>     Toggle compression
-  --read-only <on|off>       Read-only mode
-  --remote-url <url>         Remote cache endpoint
-  --remote-read-only <on|off> Remote read-only
-  --remote-timeout <ms>      Connect/read timeout
-  --stats                    Show local cache statistics
-  --remote-stats             Show remote cache statistics
-  --clear-stats              Reset statistics
-  --clean                    Remove all cache entries
-  --version                  Show version
-  --help                     Show this help
+BUILDCACHE_DIR=/path/to/cache
+BUILDCACHE_MAX_SIZE=10G
+BUILDCACHE_MAX_AGE=30
+BUILDCACHE_COMPRESSION=true
+BUILDCACHE_READ_ONLY=false
+BUILDCACHE_REMOTE_URL=http://cache.internal:8080
+BUILDCACHE_REMOTE_READ_ONLY=false
+BUILDCACHE_REMOTE_TIMEOUT=3000
+SKIPBUILD_DISABLE=1   # Disable cache (passthrough)
+SKIPBUILD_DEBUG=1     # Debug logging
 ```
 
----
-
-## Remote Cache Setup
-
-### Quick HTTP Server (Development)
-
-```bash
-# Simple Python HTTP server with upload support
-python3 -m http.server 8080 --directory /path/to/cache --bind 0.0.0.0
-```
-
-### Production: S3-Compatible (MinIO, AWS S3, etc.)
-
-```bash
-export BUILDCACHE_REMOTE_URL=http://minio.internal:9000/skipbuild-cache
-export BUILDCACHE_REMOTE_AUTH_HEADER="Authorization: Bearer <token>"
-# Or use presigned URLs for authentication
-```
-
-### Team Workflow
-
-```bash
-# Developer machines (read + write)
-export BUILDCACHE_REMOTE_URL=http://cache.company.internal:8080
-
-# CI runners (read-only for speed)
-export BUILDCACHE_REMOTE_URL=http://cache.company.internal:8080
-export BUILDCACHE_REMOTE_READ_ONLY=true
-```
-
----
-
-## Integration Examples
-
-### CMake
+### CMake Integration
 
 ```cmake
-# Option 1: find_package (installed)
-find_package(skipbuild REQUIRED)
-# skipbuild_enable() adds caching to all targets automatically
-
-# Option 2: Compiler launcher wrapper
+# Option 1: Compiler launcher wrapper (recommended)
 set(CMAKE_CXX_COMPILER_LAUNCHER "skipbuild")
-# Or per-target
+
+# Option 2: Per-target
 set_target_properties(my_target PROPERTIES
     CXX_COMPILER_LAUNCHER "skipbuild"
 )
+
+# Option 3: find_package (if installed)
+find_package(skipbuild REQUIRED)
 ```
 
 ### Make / Ninja
@@ -281,7 +250,6 @@ set_target_properties(my_target PROPERTIES
 CXX := skipbuild g++
 # or
 CXX := g++
-# with skipbuild wrapper
 COMPILE = skipbuild -- g++
 ```
 
@@ -290,11 +258,6 @@ COMPILE = skipbuild -- g++
 rule cxx
   command = skipbuild -- g++ -c $in -o $out $flags
 ```
-
-### Visual Studio
-
-1. Project Properties → Configuration Properties → C/C++ → Command Line
-2. Add to "Additional Options": `skipbuild -- %(AdditionalOptions)`
 
 ---
 
@@ -325,16 +288,6 @@ skipbuild/
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
-
-```
-Copyright (c) 2026 skipbuild contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software...
-```
 
 ---
 

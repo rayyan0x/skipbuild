@@ -191,6 +191,19 @@ The binary is at `build/skipbuild` on Linux and macOS, and `build/Release/skipbu
 cmake --install build --config Release --prefix <path>
 ```
 
+**Examples (no Admin/sudo needed):**
+```bash
+# Windows (PowerShell):
+cmake --install build --config Release --prefix $env:USERPROFILE\.local
+
+# Linux/macOS (bash/zsh):
+cmake --install build --config Release --prefix ~/.local
+```
+
+Then add `<prefix>/bin` to your PATH:
+- Windows: `$env:PATH += ";$env:USERPROFILE\.local\bin"` (or add via System → Environment Variables)
+- Linux/macOS: `export PATH="$HOME/.local/bin:$PATH"` (add to `.bashrc`/`.zshrc`)
+
 **Installed files (18 files):**
 ```
 bin/skipbuild.exe
@@ -206,7 +219,7 @@ lib/pkgconfig/libzstd.pc
 share/cmake/Modules/Findskipbuild.cmake
 ```
 
-Default prefix: `/usr/local` on Unix (needs sudo), `C:\Program Files\skipbuild` on Windows (needs Admin). Use `--prefix` for user-writable paths.
+Default prefix (no `--prefix`): `/usr/local` on Unix (needs sudo), `C:\Program Files\skipbuild` on Windows (needs Admin).
 
 ---
 
@@ -218,17 +231,26 @@ set(CMAKE_CXX_COMPILER_LAUNCHER "skipbuild")
 ```
 Output (Ninja): `[skipbuild] MISS <hash> -> compiling...` / `[skipbuild] HIT <hash>`
 
-### CMake per-target (installed)
+> **Note:** With Visual Studio generator, `CMAKE_CXX_COMPILER_LAUNCHER` is set but no `[skipbuild]` output appears in build logs.
+
+### CMake per-target (after install)
 ```cmake
 find_package(skipbuild REQUIRED)
-skipbuild_enable_target(my_target)
+skipbuild_enable_target(my_target)  # works directly
 ```
 
-### MSVC wrapper (verified)
-```bash
-skipbuild -- "F:\VS_BuildTools\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe" /c /EHsc /std:c++20 /I"F:\VS_BuildTools\VC\Tools\MSVC\14.51.36231\include" /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt" test.cpp /Fotest.obj
+# Option 2: Simpler — just set launcher on target (no install needed)
+set_target_properties(my_target PROPERTIES
+    CXX_COMPILER_LAUNCHER "skipbuild"
+)
 ```
-Output: `[skipbuild] MISS d3c8cff495a8 -> compiling...` then `[skipbuild] HIT d3c8cff495a8`
+
+### MSVC wrapper (verified in Developer PowerShell for VS 2022)
+```powershell
+# Developer PowerShell for VS 2022 sets up cl.exe, INCLUDE, LIB automatically
+skipbuild -- cl.exe /c hello.cpp /Fohello.obj
+```
+Output: `[skipbuild] MISS 48476142e635 -> compiling...` then `[skipbuild] HIT 48476142e635`
 
 ### Generic wrapper (any build system)
 ```bash
@@ -243,20 +265,44 @@ Precedence: **CLI flags > Environment variables > Config file**
 
 | Setting | CLI flag | Environment variable | Config key | Default |
 |---|---|---|---|---|
-| Cache directory | `--cache-dir <path>` | `BUILDCACHE_DIR` | `cache_dir` | `~/.cache/buildcache` |
+| Cache directory | `--cache-dir <path>` | `BUILDCACHE_DIR` / `BUILDCACHE_CACHE_DIR` | `cache_dir` | `~/.cache/buildcache` |
 | Max cache size | `--max-cache-size <size>` | `BUILDCACHE_MAX_SIZE` | `max_cache_size` | `5G` |
 | Max age (days) | `--max-age <days>` | `BUILDCACHE_MAX_AGE` | `max_age` | `30` |
+| Eviction ratio | — | `BUILDCACHE_EVICTION_RATIO` | `eviction_ratio` | `0.85` |
 | Compression | `--compression <bool>` | `BUILDCACHE_COMPRESSION` | `compression_enabled` | `true` |
 | Read-only | `--read-only <bool>` | `BUILDCACHE_READ_ONLY` | `read_only` | `false` |
+| Remote URL | — | `BUILDCACHE_REMOTE_URL` | `remote_url` | — |
+| Remote connect timeout (ms) | — | `BUILDCACHE_REMOTE_CONNECT_TIMEOUT` | `remote_connect_timeout` | `3000` |
+| Remote read timeout (ms) | — | `BUILDCACHE_REMOTE_READ_TIMEOUT` | `remote_read_timeout` | `3000` |
+| Remote max retries | — | `BUILDCACHE_REMOTE_MAX_RETRIES` | `remote_max_retries` | `1` |
+| Remote auth header | — | `BUILDCACHE_REMOTE_AUTH_HEADER` | `remote_auth_header` | — |
+| Remote verify SSL | — | `BUILDCACHE_REMOTE_VERIFY_SSL` | `remote_verify_ssl` | `true` |
 | Disable cache | — | `SKIPBUILD_DISABLE=1` | — | `false` |
 | Debug logging | — | `SKIPBUILD_DEBUG=1` | — | `false` |
 
-**Config file** (`.buildcache.conf` in project root or `~/.config/buildcache/config`):
+> **Note:** The tool is named `skipbuild` but uses `BUILDCACHE_*` environment variables (legacy from project rename). `SKIPBUILD_*` is only used for `SKIPBUILD_DISABLE` and `SKIPBUILD_DEBUG`.
+
+**Config file locations (checked in order):**
+1. `BUILDCACHE_CONFIG` env var path
+2. `.buildcache.conf` in project root
+3. `.buildcache/config` in project root
+4. Windows: `%APPDATA%\buildcache\config` or `%USERPROFILE%\.buildcache\config`
+5. Unix: `~/.config/buildcache/config` or `~/.buildcache/config`
+
+**Config file keys (exact names from code):**
 ```ini
-max_cache_size = 10G
 cache_dir = /path/to/cache
+max_cache_size = 10G
+max_age = 30
+eviction_ratio = 0.85
 compression_enabled = true
 read_only = false
+remote_url = http://cache:8080
+remote_connect_timeout = 3000
+remote_read_timeout = 3000
+remote_max_retries = 1
+remote_auth_header = Bearer ...
+remote_verify_ssl = true
 ```
 
 ---
@@ -282,18 +328,34 @@ Options:
 
 Environment:
   BUILDCACHE_DIR              Cache directory
+  BUILDCACHE_CACHE_DIR        Cache directory (alias)
   BUILDCACHE_MAX_SIZE         Max cache size (e.g., 10G, 500M)
   BUILDCACHE_MAX_AGE          Max age in days
+  BUILDCACHE_EVICTION_RATIO   Eviction ratio (0.0-1.0)
   BUILDCACHE_COMPRESSION      Enable/disable compression (true/false)
   BUILDCACHE_READ_ONLY        Read-only cache (true/false)
+  BUILDCACHE_REMOTE_URL       Remote cache endpoint
+  BUILDCACHE_REMOTE_CONNECT_TIMEOUT  Remote connect timeout (ms)
+  BUILDCACHE_REMOTE_READ_TIMEOUT     Remote read timeout (ms)
+  BUILDCACHE_REMOTE_MAX_RETRIES      Remote max retries
+  BUILDCACHE_REMOTE_AUTH_HEADER      Remote auth header
+  BUILDCACHE_REMOTE_VERIFY_SSL       Remote verify SSL (true/false)
   SKIPBUILD_DISABLE=1         Disable cache (passthrough)
   SKIPBUILD_DEBUG=1           Debug logging
 
 Config file (.buildcache.conf):
-  max_cache_size = 10G
   cache_dir = /path/to/cache
+  max_cache_size = 10G
+  max_age = 30
+  eviction_ratio = 0.85
   compression_enabled = true
   read_only = false
+  remote_url = http://cache:8080
+  remote_connect_timeout = 3000
+  remote_read_timeout = 3000
+  remote_max_retries = 1
+  remote_auth_header = Bearer ...
+  remote_verify_ssl = true
 ```
 
 ---

@@ -191,6 +191,19 @@ The binary is at `build/skipbuild` on Linux and macOS, and `build/Release/skipbu
 cmake --install build --config Release --prefix <path>
 ```
 
+**Examples (no Admin/sudo needed):**
+```bash
+# Windows (PowerShell):
+cmake --install build --config Release --prefix $env:USERPROFILE\.local
+
+# Linux/macOS (bash/zsh):
+cmake --install build --config Release --prefix ~/.local
+```
+
+Then add `<prefix>/bin` to your PATH:
+- Windows: `$env:PATH += ";$env:USERPROFILE\.local\bin"` (or add via System → Environment Variables)
+- Linux/macOS: `export PATH="$HOME/.local/bin:$PATH"` (add to `.bashrc`/`.zshrc`)
+
 **Installed files (18 files):**
 ```
 bin/skipbuild.exe
@@ -206,7 +219,7 @@ lib/pkgconfig/libzstd.pc
 share/cmake/Modules/Findskipbuild.cmake
 ```
 
-Default prefix: `/usr/local` on Unix (needs sudo), `C:\Program Files\skipbuild` on Windows (needs Admin). Use `--prefix` for user-writable paths.
+Default prefix (no `--prefix`): `/usr/local` on Unix (needs sudo), `C:\Program Files\skipbuild` on Windows (needs Admin).
 
 ---
 
@@ -218,10 +231,18 @@ set(CMAKE_CXX_COMPILER_LAUNCHER "skipbuild")
 ```
 Output (Ninja): `[skipbuild] MISS <hash> -> compiling...` / `[skipbuild] HIT <hash>`
 
-### CMake per-target (installed)
+> **Note:** With Visual Studio generator, `CMAKE_CXX_COMPILER_LAUNCHER` is set but no `[skipbuild]` output appears in build logs.
+
+### CMake per-target (after install)
 ```cmake
 find_package(skipbuild REQUIRED)
-skipbuild_enable_target(my_target)
+skipbuild_enable_target(my_target)  # works directly
+```
+
+# Option 2: Simpler — just set launcher on target (no install needed)
+set_target_properties(my_target PROPERTIES
+    CXX_COMPILER_LAUNCHER "skipbuild"
+)
 ```
 
 ### MSVC wrapper (verified in Developer PowerShell for VS 2022)

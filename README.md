@@ -252,6 +252,23 @@ skipbuild -- cl.exe /c hello.cpp /Fohello.obj
 ```
 Output: `[skipbuild] MISS 48476142e635 -> compiling...` then `[skipbuild] HIT 48476142e635`
 
+### Ninja (build.ninja)
+```ninja
+rule cxx
+  command = skipbuild -- g++ -c $in -o $out $flags
+
+build main.o: cxx main.cpp
+```
+
+### Make (Makefile)
+```make
+CXX := skipbuild g++
+CXXFLAGS := -Iinclude -O2
+
+main.o: main.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+```
+
 ### Generic wrapper (any build system)
 ```bash
 skipbuild -- clang++ -c foo.cpp -o foo.o -Iinclude -O2

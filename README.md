@@ -21,10 +21,15 @@ cmake --build build --config Release --parallel
 
 ### Step 2: Environment Setup / Install
 
-| Platform | Command |
-|---|---|
-| **macOS / Linux** | `curl -fsSL https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.sh \| bash` |
-| **Windows (PowerShell 5.1+)** | `irm https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.ps1 \| iex` |
+**macOS / Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.sh | bash
+```
+
+**Windows (PowerShell 5.1+):**
+```powershell
+irm https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.ps1 | iex
+```
 
 > **Note:** Pre-built binaries from GitHub Releases. Scripts verify checksums and add to PATH.
 

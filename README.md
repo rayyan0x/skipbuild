@@ -169,7 +169,16 @@ compile command
 
 ## Installation
 
-### Requirements
+### Quick install (pre-built binaries)
+
+| Platform | Command |
+|---|---|
+| **macOS / Linux** | `curl -fsSL https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.sh \| bash` |
+| **Windows (PowerShell 5.1+)** | `irm https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.ps1 \| iex` |
+
+> **Note:** Pre-built binaries are available from GitHub Releases. The install scripts download the latest release, verify checksums, and add `skipbuild` to your PATH.
+
+### Requirements (for building from source)
 - CMake 3.20 or newer
 - A C++20 compiler: MSVC 19.30+, GCC 11+, or Clang 13+
 - Internet access at configure time to fetch zstd 1.5.5 via FetchContent
@@ -185,7 +194,7 @@ cmake --build build --config Release --parallel
 
 The binary is at `build/skipbuild` on Linux and macOS, and `build/Release/skipbuild.exe` on Windows (Visual Studio generator).
 
-### Install
+### Install (from source build)
 
 ```bash
 cmake --install build --config Release --prefix <path>

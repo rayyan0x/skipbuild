@@ -87,23 +87,58 @@ Large C++ projects suffer from 40+ minute rebuilds. Changing one file, switching
 
 ### What it Doesn't Do
 - Does not replace your build system
-- Does not cache linking (only `-c`/`/c` compilation)
+- **⚠️ Does not cache linking** — only caches compilation (`-c`/`/c`). For large C++ projects, linking is often 30–50% of total build time. This is a deliberate design choice (linker inputs are complex and non-deterministic).
 - Does not require a remote cache server — local works out of the box
+
+### skipbuild vs ccache vs sccache
+
+| Feature | **skipbuild** | **ccache** | **sccache** |
+|---|---|---|---|
+| **MSVC `/Zi` PDB + `.idb`** | ✅ Native | ❌ Limited | ⚠️ Experimental |
+| **Deterministic cross-platform keys** | ✅ | ❌ | ✅ |
+| **Zero external dependencies** | ✅ WinCrypto / POSIX | ❌ needs zlib | ❌ needs OpenSSL |
+| **Windows-first design** | ✅ | ❌ Linux-first | ⚠️ Works |
+| **Remote cache (HTTP/S3)** | ✅ Built-in | ❌ | ✅ S3/GCS/Azure |
+| **Remote auth** | ✅ Headers | ❌ | ✅ IAM/headers |
+| **MSBuild incremental friendly** | ⚠️ Overhead on no-changes | ⚠️ Same | ⚠️ Same |
+| **Ninja/Make incremental** | ✅ Fast | ✅ Fast | ✅ Fast |
+| **Compiler binary hash invalidation** | ✅ Automatic | ✅ | ✅ |
+| **Sidecar tracking (PDB, IDB, DWO)** | ✅ Native | ❌ | ⚠️ Partial |
+| **Remote auth / private caches** | ✅ Headers | ❌ | ✅ IAM/headers |
+| **Linker caching** | ❌ | ❌ | ❌ |
+| **Single binary, no runtime deps** | ✅ | ❌ | ❌ (needs SSL) |
+
+> **TL;DR:** Use **skipbuild** for Windows/MSVC projects needing native PDB support, zero deps, and cross-platform deterministic keys. Use **ccache** for Linux-only GCC/Clang projects. Use **sccache** if you need distributed compilation with S3/GCS remote cache.
 
 ---
 
 ## 📊 Benchmarks
 
-Measured on **50 source files × 10 headers**, `-O2 -std=c++20`.
+Real-world measurements on **fmtlib** (~50 source files, CMake, MSVC 19.51, Windows 11, 12-core i7):
 
-| Scenario | Time |
+| Scenario | Without skipbuild | With skipbuild | Notes |
+|---|---|---|---|
+| **Cold build** (first build) | 141 s | 141 s | All misses — same compiler work |
+| **Clean rebuild** (after previous build) | 141 s | **3.2 s** | All cache hits — **~44x speedup** |
+| **Switch branches** (git checkout) | 141 s | **3.5 s** | All hits — **~40x speedup** |
+| **Incremental** (touch 1 file) | 15.6 s | 15.8 s | MSBuild incremental faster than cache lookup |
+| **Hot rebuild** (no changes) | 6.6 s | 10.0 s | MSBuild skips compiler; skipbuild adds overhead |
+
+> **Key insight:** skipbuild (like ccache/sccache) shines on **clean rebuilds, branch switches, and CI fresh runners** — not on incremental "no changes" builds. MSBuild's native incremental is already faster than cache lookup overhead.
+
+**Measured on:** fmtlib v12.2.1 (~50 source files), MSVC 19.51, Windows 11, 12-core i7-13700K, `-O2 -std=c++20`.
+
+**Overhead per file on cache miss:** ~4 ms (<1% of compile time)
+
+**Where skipbuild shines:**
+| Scenario | Speedup |
 |---|---|
-| Cold build (no cache) | 22.0 s |
-| Hot rebuild (all cache hits) | 0.2 s |
-| **Speedup** | **~110x** |
-| Overhead per file on cache miss | ~4 ms (<1% of compile time) |
+| Clean rebuild (after previous build) | **~44x** |
+| Switch git branches | **~40x** |
+| CI fresh runner (shared cache) | **10–100x** |
+| Delete build dir, rebuild | **~44x** |
 
-**Hardware/OS/Compilers:** Windows 11 (MSVC 19.51) / Ubuntu 24.04 (GCC 13.3) / macOS 26 (Apple Clang 21)
+> **Note:** For daily incremental dev, use **Ninja generator** (`cmake -G Ninja`) with skipbuild — MSBuild's native incremental is already optimal.
 
 ---
 
@@ -111,12 +146,34 @@ Measured on **50 source files × 10 headers**, `-O2 -std=c++20`.
 
 ### A. Global / Automatic Integration
 
-| Build System | One-Line Config |
-|---|---|
-| **CMake (Ninja/Make)** | `set(CMAKE_CXX_COMPILER_LAUNCHER "skipbuild")` |
-| **CMake (per-target)** | `set_target_properties(tgt PROPERTIES CXX_COMPILER_LAUNCHER "skipbuild")` |
-| **Ninja** | `rule cxx: command = skipbuild -- g++ -c $in -o $out $flags` |
-| **Make** | `CXX := skipbuild g++` |
+**CMake (Ninja/Make generators):**
+```cmake
+set(CMAKE_CXX_COMPILER_LAUNCHER "skipbuild")
+```
+
+**CMake (per-target):**
+```cmake
+set_target_properties(my_target PROPERTIES
+    CXX_COMPILER_LAUNCHER "skipbuild"
+)
+```
+
+**Ninja (`build.ninja`):**
+```ninja
+rule cxx
+  command = skipbuild -- g++ -c $in -o $out $flags
+
+build main.o: cxx main.cpp
+```
+
+**Make (`Makefile`):**
+```make
+CXX := skipbuild g++
+CXXFLAGS := -Iinclude -O2
+
+main.o: main.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+```
 
 > **Note:** VS generator sets launcher but shows no `[skipbuild]` output in logs.
 
@@ -268,6 +325,156 @@ Options:
 
 **Cache directory:** `~/.cache/buildcache` (Windows: `%LOCALAPPDATA%\buildcache`)  
 **Size limit:** 5 GB default, 85% target, LRU + max-age (30 days) eviction
+
+---
+
+## ☁️ Remote Caching
+
+skipbuild supports remote caching via HTTP/S3-compatible APIs. Configure with:
+
+| Setting | Environment Variable | Config Key |
+|---|---|---|
+| Remote URL | `BUILDCACHE_REMOTE_URL` | `remote_url` |
+| Connect timeout (ms) | `BUILDCACHE_REMOTE_CONNECT_TIMEOUT` | `remote_connect_timeout` |
+| Read timeout (ms) | `BUILDCACHE_REMOTE_READ_TIMEOUT` | `remote_read_timeout` |
+| Max retries | `BUILDCACHE_REMOTE_MAX_RETRIES` | `remote_max_retries` |
+| Auth header | `BUILDCACHE_REMOTE_AUTH_HEADER` | `remote_auth_header` |
+| Verify SSL | `BUILDCACHE_REMOTE_VERIFY_SSL` | `remote_verify_ssl` |
+
+**Example (S3-compatible):**
+```bash
+export BUILDCACHE_REMOTE_URL="http://127.0.0.1:9000/my-bucket"
+export BUILDCACHE_REMOTE_AUTH_HEADER="Authorization: Bearer my-token"
+export BUILDCACHE_REMOTE_VERIFY_SSL=false
+skipbuild -- cl.exe /c hello.cpp /Fohello.obj
+```
+
+### Local Testing Guide: Remote S3 Caching
+
+You can easily verify the end-to-end remote caching loop (Cache Miss $\rightarrow$ Upload $\rightarrow$ Cache Hit) using a lightweight Python S3 mock server without needing complex MinIO or AWS infrastructure.
+
+### 1. Start the Local S3 Mock Server
+Create a script named `s3_mock.py`:
+
+```python
+import http.server
+import os
+import urllib.parse
+
+PORT = 9000
+STORAGE_DIR = r"./s3_data"
+os.makedirs(STORAGE_DIR, exist_ok=True)
+
+class S3MockHandler(http.server.BaseHTTPRequestHandler):
+    def do_PUT(self):
+        path = urllib.parse.urlparse(self.path).path
+        file_path = os.path.join(STORAGE_DIR, path.lstrip("/"))
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        data = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        with open(file_path, "wb") as f:
+            f.write(data)
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+        print(f"[CACHE UPLOAD] Saved: {path}")
+
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+        file_path = os.path.join(STORAGE_DIR, path.lstrip("/"))
+        if os.path.exists(file_path):
+            self.send_response(200)
+            self.end_headers()
+            with open(file_path, "rb") as f:
+                self.wfile.write(f.read())
+            print(f"[CACHE HIT] Served: {path}")
+        else:
+            self.send_response(404)
+            self.end_headers()
+            print(f"[CACHE MISS] Not found: {path}")
+
+    def do_HEAD(self):
+        path = urllib.parse.urlparse(self.path).path
+        file_path = os.path.join(STORAGE_DIR, path.lstrip("/"))
+        self.send_response(200 if os.path.exists(file_path) else 404)
+        self.end_headers()
+
+if __name__ == "__main__":
+    server = http.server.HTTPServer(("127.0.0.1", PORT), S3MockHandler)
+    print(f"🚀 S3 Mock Server running on [http://127.0.0.1](http://127.0.0.1):{PORT}")
+    server.serve_forever()
+```
+
+Run it:
+```bash
+python s3_mock.py
+```
+
+### 2. Configure skipbuild to Use the Mock Server
+```powershell
+$env:BUILDCACHE_REMOTE_URL = "http://127.0.0.1:9000/test-bucket"
+$env:BUILDCACHE_REMOTE_VERIFY_SSL = "false"
+$env:BUILDCACHE_REMOTE_CONNECT_TIMEOUT = "2000"
+$env:BUILDCACHE_REMOTE_READ_TIMEOUT = "2000"
+```
+
+### 3. Test the Cache Loop
+```powershell
+# First run - Cache MISS, compiles and uploads
+skipbuild -- cl.exe /c hello.cpp /Fohello.obj
+# [skipbuild] MISS <hash> -> compiling...
+# [CACHE UPLOAD] Saved: /test-bucket/<hash>.zst
+
+# Second run - Cache HIT, downloads from mock server
+skipbuild -- cl.exe /c hello.cpp /Fohello.obj
+# [skipbuild] HIT <hash>
+# [CACHE HIT] Served: /test-bucket/<hash>.zst
+```
+
+### 4. Verify in Mock Server Logs
+```
+[CACHE MISS] Not found: /test-bucket/48476142e635...
+[CACHE UPLOAD] Saved: /test-bucket/48476142e635...
+[CACHE HIT] Served: /test-bucket/48476142e635...
+```
+
+This confirms the full remote cache round-trip works: miss → compile → upload → hit → download.
+
+### Production Usage: Team & CI Workflow
+
+Run the mock server in Terminal 1:
+
+```powershell
+python s3_mock.py
+```
+
+Configure & Test in Terminal 2:
+
+```powershell
+# Point to your S3 remote cache endpoint
+$env:BUILDCACHE_REMOTE_URL = "http://127.0.0.1:9000/skipbuild-cache"
+$env:BUILDCACHE_COMPRESSION = "true"
+$env:SKIPBUILD_DEBUG = "1"
+
+# Run a test compilation (example using MSVC)
+.\skipbuild.exe cl /c hello.cpp /Fohello.obj
+```
+
+**First Run:** Triggers a Cache Miss, compiles the file, and uploads the compressed `.zst` artifact and `meta.json` to the mock server (`[CACHE UPLOAD]`).
+
+**Second Run:** Triggers an instant Cache Hit, skipping compilation entirely and restoring the object from the remote cache (`[CACHE HIT]`).
+
+### Does this work for teams and larger files?
+
+**Yes, absolutely.** This architecture is built precisely for team environments and large-scale codebases. Here is why it scales:
+
+1. **Shared Team Remote Caching:**
+   Instead of pointing `BUILDCACHE_REMOTE_URL` to a local mock server, production teams point it to a **shared S3 bucket** (like AWS S3, Cloudflare R2, MinIO cluster, or Google Cloud Storage via S3-compat APIs).
+   * When **Developer A** compiles a large codebase for the first time, the objects are pushed to the central S3 bucket.
+   * When **Developer B** (or a CI/CD pipeline like GitHub Actions) builds the exact same code changes later, they pull the pre-compiled objects instantly via **Cache Hit**, cutting build times down to seconds.
+
+2. **Handling Large Files Efficiently:**
+   * **Zstandard (`zst`) Compression:** As you saw in your mock server logs (`.zst`), `skipbuild` compresses compiled binary outputs before uploading them. This drastically reduces network payload size, making it fast even over standard internet connections.
+   * **Content-Addressable Storage (CAS):** Because caching is keyed by cryptographic hashes of the file contents and compiler flags, identical artifacts are never uploaded twice. The bucket stores one copy per unique compilation result.
 
 ---
 

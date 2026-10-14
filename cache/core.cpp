@@ -1301,57 +1301,67 @@ CompilerInfo detect_compiler(const std::string& compiler_path) {
 static std::vector<std::string> parse_response_file(const std::filesystem::path& rsp_path) {
     std::vector<std::string> expanded_args;
     
-    std::ifstream file(rsp_path);
-    if (!file) return expanded_args;
-    
-    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    if (content.empty()) return expanded_args;
-    
-    // Normalize line endings
-    std::replace(content.begin(), content.end(), '\r', ' ');
-    
-    std::string current_arg;
-    bool in_quotes = false;
-    bool escape_next = false;
-    
-    for (size_t i = 0; i < content.size(); ++i) {
-        char c = content[i];
+    try {
+        std::ifstream file(rsp_path);
+        if (!file) return expanded_args;
         
-        if (escape_next) {
-            current_arg += c;
-            escape_next = false;
-            continue;
+        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        if (content.empty()) return expanded_args;
+        
+        // Limit content size to prevent issues
+        if (content.size() > 1024 * 1024) {
+            content = content.substr(0, 1024 * 1024);
         }
         
-        if (c == '\\') {
-            // Check if next char is quote (escaped quote)
-            if (i + 1 < content.size() && content[i + 1] == '"') {
-                escape_next = true;
+        // Normalize line endings
+        std::replace(content.begin(), content.end(), '\r', ' ');
+        
+        std::string current_arg;
+        bool in_quotes = false;
+        bool escape_next = false;
+        
+        for (size_t i = 0; i < content.size(); ++i) {
+            char c = content[i];
+            
+            if (escape_next) {
+                current_arg += c;
+                escape_next = false;
                 continue;
             }
-            current_arg += c;
-            continue;
-        }
-        
-        if (c == '"') {
-            in_quotes = !in_quotes;
-            current_arg += c;
-            continue;
-        }
-        
-        if (!in_quotes && (c == ' ' || c == '\t' || c == '\n')) {
-            if (!current_arg.empty()) {
-                expanded_args.push_back(current_arg);
-                current_arg.clear();
+            
+            if (c == '\\') {
+                // Check if next char is quote (escaped quote)
+                if (i + 1 < content.size() && content[i + 1] == '"') {
+                    escape_next = true;
+                    continue;
+                }
+                current_arg += c;
+                continue;
             }
-            continue;
+            
+            if (c == '"') {
+                in_quotes = !in_quotes;
+                current_arg += c;
+                continue;
+            }
+            
+            if (!in_quotes && (c == ' ' || c == '\t' || c == '\n')) {
+                if (!current_arg.empty()) {
+                    expanded_args.push_back(current_arg);
+                    current_arg.clear();
+                }
+                continue;
+            }
+            
+            current_arg += c;
         }
         
-        current_arg += c;
-    }
-    
-    if (!current_arg.empty()) {
-        expanded_args.push_back(current_arg);
+        if (!current_arg.empty()) {
+            expanded_args.push_back(current_arg);
+        }
+    } catch (...) {
+        // Return empty on any error
+        return {};
     }
     
     return expanded_args;
@@ -1380,14 +1390,19 @@ static std::vector<std::string> expand_response_files(int argc, char* argv[]) {
         
         if (arg.size() >= 2 && arg[0] == '@') {
             // Response file argument
-            std::filesystem::path rsp_path = arg.substr(1);
-            if (std::filesystem::exists(rsp_path)) {
-                auto rsp_args = parse_response_file(rsp_path);
-                // Prepend to to_process for recursive expansion
-                to_process.insert(to_process.begin(), rsp_args.begin(), rsp_args.end());
-                recursion_depth++;
-            } else {
-                // File doesn't exist, pass through as-is
+            try {
+                std::filesystem::path rsp_path = arg.substr(1);
+                if (std::filesystem::exists(rsp_path)) {
+                    auto rsp_args = parse_response_file(rsp_path);
+                    // Prepend to to_process for recursive expansion
+                    to_process.insert(to_process.begin(), rsp_args.begin(), rsp_args.end());
+                    recursion_depth++;
+                } else {
+                    // File doesn't exist, pass through as-is
+                    expanded.push_back(arg);
+                }
+            } catch (...) {
+                // Path error or filesystem error, pass through as-is
                 expanded.push_back(arg);
             }
         } else {

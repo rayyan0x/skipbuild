@@ -47,7 +47,7 @@ target_link_libraries(skipbuild remake_core)
 # Tests
 enable_testing()
 
-foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats)
+foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats pch response_file)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} remake_core)
 endforeach()
@@ -62,6 +62,8 @@ add_test(NAME cache_key_determinism_test COMMAND test_cache_key_determinism)
 add_test(NAME resiliency_test COMMAND test_resiliency)
 add_test(NAME config_test COMMAND test_config)
 add_test(NAME stats_test COMMAND test_stats)
+add_test(NAME pch_test COMMAND test_pch)
+add_test(NAME response_file_test COMMAND test_response_file)
 
 # Install targets
 install(TARGETS skipbuild

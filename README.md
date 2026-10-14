@@ -126,6 +126,8 @@ Real-world measurements on **fmtlib** (~50 source files, CMake, MSVC 19.51, Wind
 
 > **Key insight:** skipbuild (like ccache/sccache) shines on **clean rebuilds, branch switches, and CI fresh runners** — not on incremental "no changes" builds. MSBuild's native incremental is already faster than cache lookup overhead.
 
+> **Don't worry:** skipbuild auto-detects MSBuild incremental builds (output newer than source) and **bypasses the cache entirely** — you get native MSBuild speed with zero config.
+
 **Measured on:** fmtlib v12.2.1 (~50 source files), MSVC 19.51, Windows 11, 12-core i7-13700K, `-O2 -std=c++20`.
 
 **Overhead per file on cache miss:** ~4 ms (<1% of compile time)
@@ -138,7 +140,7 @@ Real-world measurements on **fmtlib** (~50 source files, CMake, MSVC 19.51, Wind
 | CI fresh runner (shared cache) | **10–100x** |
 | Delete build dir, rebuild | **~44x** |
 
-> **Note:** For daily incremental dev, use **Ninja generator** (`cmake -G Ninja`) with skipbuild — MSBuild's native incremental is already optimal.
+> **Note:** For daily incremental dev, use **Ninja generator** (`cmake -G Ninja`) with skipbuild — MSBuild's native incremental is already optimal (and skipbuild auto-disables for it anyway).
 
 ---
 
@@ -496,11 +498,11 @@ $env:SKIPBUILD_DEBUG = "1"
 | Limitation | Status |
 |---|---|
 | Linker caching | Not implemented — only `-c`/`/c` |
-| Remote cache (HTTP/S3) | Code exists, untested vs real server, no auth |
-| GCC/Clang PCH (`-x c++-header`) | Detected, not fully validated |
-| MSVC `/Yc`/`/Yu` PCH | Detected, not fully validated |
-| Windows/Linux ARM64 | Not tested |
-| FreeBSD / other BSDs | Not tested |
+| Remote cache (HTTP/S3) | Built-in, tested with S3 mock; auth via headers only |
+| GCC/Clang PCH (`-x c++-header`) | ✅ Implemented — flag parsing, key invalidation, dual-output caching |
+| MSVC `/Yc`/`/Yu` PCH | ✅ Implemented — flag parsing, key invalidation, dual-output caching |
+| Windows/Linux ARM64 | Not tested — code is portable, no CI coverage |
+| FreeBSD / other BSDs | Not tested — POSIX paths should work, no CI |
 | Distributed builds (distcc/icecream) | Not tested |
 | VS generator | Launcher set but no visible `[skipbuild]` output |
 
@@ -511,13 +513,13 @@ $env:SKIPBUILD_DEBUG = "1"
 **Security:**
 - Cache stores: compiler output (`.obj`/`.o`), debug sidecars (`.pdb`, `.idb`, `.dwo`), metadata (key, toolchain hash, timestamps). No source code.
 - Disk: zstd level 3 compressed blobs in `~/.cache/buildcache/aa/bb/<hash>/` with `meta.json`
-- Remote auth: Not implemented — do not expose to untrusted networks
+- Remote auth: Header-based (`BUILDCACHE_REMOTE_AUTH_HEADER`) — do not expose to untrusted networks without TLS
 - Reporting: See [SECURITY.md](SECURITY.md)
 
 **Testing:**
 ```bash
 ctest --test-dir build -C Release --output-on-failure --timeout 120
 ```
-All 10 tests pass on Windows, Linux, macOS (CI verified).
+All 11 tests pass on Windows, Linux, macOS (CI verified).
 
 **License:** MIT — see [LICENSE](LICENSE)

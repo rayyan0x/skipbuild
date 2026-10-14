@@ -10,15 +10,13 @@ void test_response_file_basic() {
     std::cout << "Testing basic response file parsing...\n";
     std::cout.flush();
     
-    fs::path test_dir = fs::temp_directory_path() / "remake-test-rsp-basic";
+    fs::path test_dir = fs::temp_directory_path() / "rsp_b";
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
-    // Create response file
-    fs::path rsp_file = test_dir / "compile.rsp";
+    fs::path rsp_file = test_dir / "c.rsp";
     std::ofstream(rsp_file) << "-c -o main.o main.cpp -Iinclude -O2 -Wall";
     
-    // Simulate: cl.exe @compile.rsp (use absolute path)
     std::string rsp_arg = "@" + rsp_file.string();
     const char* argv[] = {
         "cl.exe", rsp_arg.c_str(), nullptr
@@ -28,7 +26,7 @@ void test_response_file_basic() {
     assert(cmd.has_value());
     assert(cmd->source.string().find("main.cpp") != std::string::npos);
     assert(cmd->output.string().find("main.o") != std::string::npos);
-    assert(cmd->flags.size() >= 2); // -O2, -Wall
+    assert(cmd->flags.size() >= 2);
     assert(cmd->includes.size() == 1);
     assert(cmd->includes[0] == "include");
     
@@ -46,12 +44,13 @@ void test_response_file_quoted_args() {
     std::cout << "Testing response file with quoted arguments...\n";
     std::cout.flush();
     
-    fs::path test_dir = fs::temp_directory_path() / "remake-test-rsp-quoted";
+    // Use shorter path to avoid Windows MAX_PATH issues on CI
+    fs::path test_dir = fs::temp_directory_path() / "rsp_q";
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
     // Create response file with quoted paths (spaces) - simpler version
-    fs::path rsp_file = test_dir / "compile.rsp";
+    fs::path rsp_file = test_dir / "c.rsp";
     std::ofstream(rsp_file) << "-c -o \"main.o\" \"main.cpp\" -Iinclude -O2";
     
     std::string rsp_arg = "@" + rsp_file.string();
@@ -76,12 +75,11 @@ void test_response_file_escaped_quotes() {
     std::cout << "Testing response file with escaped quotes...\n";
     std::cout.flush();
     
-    fs::path test_dir = fs::temp_directory_path() / "remake-test-rsp-escaped";
+    fs::path test_dir = fs::temp_directory_path() / "rsp_e";
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
-    // Create response file with escaped quotes
-    fs::path rsp_file = test_dir / "compile.rsp";
+    fs::path rsp_file = test_dir / "c.rsp";
     std::ofstream(rsp_file) << "-c -o main.o main.cpp -D\"QUOTED=\\\"hello\\\"\"";
     
     std::string rsp_arg = "@" + rsp_file.string();
@@ -111,12 +109,11 @@ void test_response_file_multiline() {
     std::cout << "Testing response file with multiple lines...\n";
     std::cout.flush();
     
-    fs::path test_dir = fs::temp_directory_path() / "remake-test-rsp-multiline";
+    fs::path test_dir = fs::temp_directory_path() / "rsp_m";
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
-    // Create response file with multiple lines (CRLF and LF)
-    fs::path rsp_file = test_dir / "compile.rsp";
+    fs::path rsp_file = test_dir / "c.rsp";
     std::ofstream(rsp_file) << "-c\n-o main.o\nmain.cpp\n-Iinclude\n-O2\n-Wall\n";
     
     std::string rsp_arg = "@" + rsp_file.string();
@@ -143,16 +140,14 @@ void test_response_file_nested() {
     std::cout << "Testing nested response files...\n";
     std::cout.flush();
     
-    fs::path test_dir = fs::temp_directory_path() / "remake-test-rsp-nested";
+    fs::path test_dir = fs::temp_directory_path() / "rsp_n";
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
-    // Create nested response files
-    fs::path rsp1 = test_dir / "flags.rsp";
+    fs::path rsp1 = test_dir / "f.rsp";
     std::ofstream(rsp1) << "-O2 -Wall -Wextra";
     
-    fs::path rsp2 = test_dir / "compile.rsp";
-    // Use absolute path for nested response file
+    fs::path rsp2 = test_dir / "c.rsp";
     std::ofstream(rsp2) << "-c -o main.o main.cpp -Iinclude @" + rsp1.string();
     
     std::string rsp_arg = "@" + rsp2.string();
@@ -185,12 +180,11 @@ void test_response_file_msvc_style() {
     std::cout << "Testing MSVC-style response file...\n";
     std::cout.flush();
     
-    fs::path test_dir = fs::temp_directory_path() / "remake-test-rsp-msvc";
+    fs::path test_dir = fs::temp_directory_path() / "rsp_v";
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
-    // Create MSVC-style response file
-    fs::path rsp_file = test_dir / "compile.rsp";
+    fs::path rsp_file = test_dir / "c.rsp";
     std::ofstream(rsp_file) << "/c /Fomain.obj main.cpp /Iinclude /O2 /Zi /DWIN32";
     
     std::string rsp_arg = "@" + rsp_file.string();
@@ -202,7 +196,7 @@ void test_response_file_msvc_style() {
     assert(cmd.has_value());
     assert(cmd->source.string().find("main.cpp") != std::string::npos);
     assert(cmd->output.string().find("main.obj") != std::string::npos);
-    assert(cmd->has_debug_info == true); // /Zi
+    assert(cmd->has_debug_info == true);
     
     bool has_win32 = false;
     for (const auto& flag : cmd->flags) {
@@ -223,12 +217,12 @@ void test_response_file_mixed_with_direct_args() {
     std::cout << "Testing response file mixed with direct arguments...\n";
     std::cout.flush();
     
-    fs::path test_dir = fs::temp_directory_path() / "remake-test-rsp-mixed";
+    fs::path test_dir = fs::temp_directory_path() / "rsp_x";
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
     // Response file + direct args
-    fs::path rsp_file = test_dir / "common.rsp";
+    fs::path rsp_file = test_dir / "c.rsp";
     std::ofstream(rsp_file) << "-Icommon_include -O2 -Wall";
     
     // cl.exe @common.rsp -c -o main.o main.cpp -Ispecific_include
@@ -261,12 +255,12 @@ void test_response_file_crlf_line_endings() {
     std::cout << "Testing CRLF line endings in response file...\n";
     std::cout.flush();
     
-    fs::path test_dir = fs::temp_directory_path() / "remake-test-rsp-crlf";
+    fs::path test_dir = fs::temp_directory_path() / "rsp_c";
     if (fs::exists(test_dir)) fs::remove_all(test_dir);
     fs::create_directories(test_dir);
     
     // Create response file with CRLF line endings (Windows style)
-    fs::path rsp_file = test_dir / "compile.rsp";
+    fs::path rsp_file = test_dir / "c.rsp";
     std::ofstream(rsp_file, std::ios::binary) << "-c\r\n-o main.o\r\nmain.cpp\r\n";
     
     std::string rsp_arg = "@" + rsp_file.string();

@@ -11,7 +11,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          # x64 platforms
+          - os: windows-latest
+          - os: ubuntu-latest
+          - os: macos-latest
+          # ARM64 platforms
+          - os: ubuntu-24.04-arm
+            name: "Ubuntu ARM64"
+          - os: macos-14
+            name: "macOS ARM64 (Apple Silicon)"
+          - os: windows-11-arm
+            name: "Windows ARM64"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -30,14 +41,14 @@ jobs:
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: skipbuild-windows
+          name: skipbuild-${{ matrix.name || runner.os }}-${{ runner.arch }}
           path: build/Release/skipbuild.exe
 
       - name: Upload binary (Unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: skipbuild-${{ runner.os }}
+          name: skipbuild-${{ matrix.name || runner.os }}-${{ runner.arch }}
           path: build/skipbuild
 
   release:

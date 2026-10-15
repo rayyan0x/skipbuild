@@ -279,6 +279,102 @@ void test_response_file_crlf_line_endings() {
     fs::remove_all(test_dir);
 }
 
+void test_response_file_utf8_bom() {
+    std::cout << "Testing UTF-8 BOM in response file...\n";
+    std::cout.flush();
+    
+    fs::path test_dir = fs::temp_directory_path() / "rsp_bom";
+    if (fs::exists(test_dir)) fs::remove_all(test_dir);
+    fs::create_directories(test_dir);
+    
+    // Create response file with UTF-8 BOM
+    fs::path rsp_file = test_dir / "c.rsp";
+    std::ofstream ofs(rsp_file, std::ios::binary);
+    // Write UTF-8 BOM (0xEF, 0xBB, 0xBF) followed by content
+    ofs.write("\xEF\xBB\xBF-c -o main.o main.cpp", 21);
+    ofs.close();
+    
+    std::string rsp_arg = "@" + rsp_file.string();
+    const char* argv[] = {
+        "cl.exe", rsp_arg.c_str(), nullptr
+    };
+    
+    auto cmd = skipbuild::parse_compile_command(2, const_cast<char**>(argv));
+    assert(cmd.has_value());
+    assert(cmd->source.string().find("main.cpp") != std::string::npos);
+    assert(cmd->output.string().find("main.o") != std::string::npos);
+    
+    std::cout << "  PASS: UTF-8 BOM handled\n";
+    std::cout.flush();
+    
+    fs::remove_all(test_dir);
+}
+
+void test_response_file_recursion_depth_limit() {
+    std::cout << "Testing response file recursion depth limit...\n";
+    std::cout.flush();
+    
+    fs::path test_dir = fs::temp_directory_path() / "rsp_depth";
+    if (fs::exists(test_dir)) fs::remove_all(test_dir);
+    fs::create_directories(test_dir);
+    
+    // Create a chain of 12 nested response files (exceeds max depth of 10)
+    std::vector<fs::path> rsp_files;
+    for (int i = 0; i < 12; ++i) {
+        rsp_files.push_back(test_dir / ("rsp" + std::to_string(i) + ".rsp"));
+    }
+    
+    // Last file has actual content
+    std::ofstream(rsp_files[11]) << "-c -o main.o main.cpp";
+    
+    // Each file includes the next
+    for (int i = 10; i >= 0; --i) {
+        std::ofstream(rsp_files[i]) << "@" + rsp_files[i + 1].string();
+    }
+    
+    std::string rsp_arg = "@" + rsp_files[0].string();
+    const char* argv[] = {
+        "cl.exe", rsp_arg.c_str(), nullptr
+    };
+    
+    // Should return nullopt due to recursion depth exceeded
+    auto cmd = skipbuild::parse_compile_command(2, const_cast<char**>(argv));
+    assert(!cmd.has_value());
+    
+    std::cout << "  PASS: Recursion depth limit enforced\n";
+    std::cout.flush();
+    
+    fs::remove_all(test_dir);
+}
+
+void test_response_file_unclosed_quotes() {
+    std::cout << "Testing unclosed quotes in response file...\n";
+    std::cout.flush();
+    
+    fs::path test_dir = fs::temp_directory_path() / "rsp_uq";
+    if (fs::exists(test_dir)) fs::remove_all(test_dir);
+    fs::create_directories(test_dir);
+    
+    // Create response file with unclosed quote
+    fs::path rsp_file = test_dir / "c.rsp";
+    std::ofstream(rsp_file) << "-c -o \"main.o main.cpp";  // Missing closing quote
+    
+    std::string rsp_arg = "@" + rsp_file.string();
+    const char* argv[] = {
+        "cl.exe", rsp_arg.c_str(), nullptr
+    };
+    
+    // Should handle gracefully and not crash
+    auto cmd = skipbuild::parse_compile_command(2, const_cast<char**>(argv));
+    // May or may not parse successfully, but should not crash
+    // We just verify no exception is thrown
+    
+    std::cout << "  PASS: Unclosed quotes handled gracefully\n";
+    std::cout.flush();
+    
+    fs::remove_all(test_dir);
+}
+
 int main() {
     std::cout << "=== Response File Parsing Tests ===\n\n";
     std::cout << "Starting test_response_file_basic...\n";
@@ -313,6 +409,18 @@ int main() {
     std::cout.flush();
     
     test_response_file_crlf_line_endings();
+    std::cout << "\n";
+    std::cout.flush();
+    
+    test_response_file_utf8_bom();
+    std::cout << "\n";
+    std::cout.flush();
+    
+    test_response_file_recursion_depth_limit();
+    std::cout << "\n";
+    std::cout.flush();
+    
+    test_response_file_unclosed_quotes();
     std::cout << "\n";
     std::cout.flush();
     

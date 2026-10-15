@@ -1298,11 +1298,17 @@ CompilerInfo detect_compiler(const std::string& compiler_path) {
 
 // Parse response file (@file.rsp) - handles MSVC/Ninja/CMake format
 // Returns expanded arguments, or empty vector on error
-static std::vector<std::string> parse_response_file(const std::filesystem::path& rsp_path) {
+// depth: recursion depth for nested @file includes (max 10)
+static std::vector<std::string> parse_response_file(const std::filesystem::path& rsp_path, int depth = 0) {
+    constexpr int MAX_RECURSION_DEPTH = 10;
     std::vector<std::string> expanded_args;
     
+    if (depth > MAX_RECURSION_DEPTH) {
+        throw std::runtime_error("Response file recursion depth exceeded (max " + std::to_string(MAX_RECURSION_DEPTH) + ")");
+    }
+    
     try {
-        std::ifstream file(rsp_path);
+        std::ifstream file(rsp_path, std::ios::binary);
         if (!file) return expanded_args;
         
         std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
@@ -1313,15 +1319,41 @@ static std::vector<std::string> parse_response_file(const std::filesystem::path&
             content = content.substr(0, 1024 * 1024);
         }
         
-        // Normalize line endings
-        std::replace(content.begin(), content.end(), '\r', ' ');
+        // Strip UTF-8 BOM if present (0xEF, 0xBB, 0xBF)
+        if (content.size() >= 3 &&
+            static_cast<unsigned char>(content[0]) == 0xEF &&
+            static_cast<unsigned char>(content[1]) == 0xBB &&
+            static_cast<unsigned char>(content[2]) == 0xBF) {
+            content = content.substr(3);
+        }
+        
+        // Normalize line endings: replace \r\n and \r with \n
+        // Then split by \n to process line by line, stripping trailing \r from each line
+        std::string normalized;
+        normalized.reserve(content.size());
+        for (size_t i = 0; i < content.size(); ++i) {
+            char c = content[i];
+            if (c == '\r') {
+                if (i + 1 < content.size() && content[i + 1] == '\n') {
+                    // CRLF -> skip \r, let \n be processed next iteration
+                    continue;
+                }
+                // Standalone \r -> treat as \n
+                normalized += '\n';
+            } else {
+                normalized += c;
+            }
+        }
         
         std::string current_arg;
         bool in_quotes = false;
         bool escape_next = false;
         
-        for (size_t i = 0; i < content.size(); ++i) {
-            char c = content[i];
+        for (size_t i = 0; i < normalized.size(); ++i) {
+            // Strict bounds check
+            if (i >= normalized.size()) break;
+            
+            char c = normalized[i];
             
             if (escape_next) {
                 current_arg += c;
@@ -1330,8 +1362,8 @@ static std::vector<std::string> parse_response_file(const std::filesystem::path&
             }
             
             if (c == '\\') {
-                // Check if next char is quote (escaped quote)
-                if (i + 1 < content.size() && content[i + 1] == '"') {
+                // Check if next char is quote (escaped quote) - strict bounds check
+                if (i + 1 < normalized.size() && normalized[i + 1] == '"') {
                     escape_next = true;
                     continue;
                 }
@@ -1347,7 +1379,13 @@ static std::vector<std::string> parse_response_file(const std::filesystem::path&
             
             if (!in_quotes && (c == ' ' || c == '\t' || c == '\n')) {
                 if (!current_arg.empty()) {
-                    expanded_args.push_back(current_arg);
+                    // Strip any trailing \r that might remain (defensive)
+                    while (!current_arg.empty() && current_arg.back() == '\r') {
+                        current_arg.pop_back();
+                    }
+                    if (!current_arg.empty()) {
+                        expanded_args.push_back(current_arg);
+                    }
                     current_arg.clear();
                 }
                 continue;
@@ -1357,10 +1395,19 @@ static std::vector<std::string> parse_response_file(const std::filesystem::path&
         }
         
         if (!current_arg.empty()) {
-            expanded_args.push_back(current_arg);
+            // Strip any trailing \r from final token
+            while (!current_arg.empty() && current_arg.back() == '\r') {
+                current_arg.pop_back();
+            }
+            if (!current_arg.empty()) {
+                expanded_args.push_back(current_arg);
+            }
         }
+    } catch (const std::exception&) {
+        // Re-throw std::exception (including our recursion depth error)
+        throw;
     } catch (...) {
-        // Return empty on any error
+        // Return empty on any other error
         return {};
     }
     
@@ -1375,32 +1422,46 @@ static std::vector<std::string> expand_response_files(int argc, char* argv[]) {
     // Add compiler path (argv[0])
     expanded.push_back(argv[0]);
     
-    std::vector<std::string> to_process;
+    struct PendingArg {
+        std::string arg;
+        int depth;
+    };
+    
+    std::vector<PendingArg> to_process;
     for (int i = 1; i < argc; ++i) {
-        to_process.push_back(argv[i]);
+        to_process.push_back({argv[i], 0});
     }
     
-    // Process with recursion limit to prevent infinite loops
-    const int MAX_RECURSION = 10;
-    int recursion_depth = 0;
+    constexpr int MAX_RECURSION_DEPTH = 10;
     
-    while (!to_process.empty() && recursion_depth < MAX_RECURSION) {
-        std::string arg = to_process.front();
+    while (!to_process.empty()) {
+        PendingArg current = to_process.front();
         to_process.erase(to_process.begin());
+        
+        std::string arg = current.arg;
+        int depth = current.depth;
         
         if (arg.size() >= 2 && arg[0] == '@') {
             // Response file argument
             try {
                 std::filesystem::path rsp_path = arg.substr(1);
                 if (std::filesystem::exists(rsp_path)) {
-                    auto rsp_args = parse_response_file(rsp_path);
-                    // Prepend to to_process for recursive expansion
-                    to_process.insert(to_process.begin(), rsp_args.begin(), rsp_args.end());
-                    recursion_depth++;
+                    // Check depth before parsing
+                    if (depth >= MAX_RECURSION_DEPTH) {
+                        throw std::runtime_error("Response file recursion depth exceeded (max " + std::to_string(MAX_RECURSION_DEPTH) + ")");
+                    }
+                    auto rsp_args = parse_response_file(rsp_path, depth);
+                    // Prepend to to_process for recursive expansion with incremented depth
+                    for (auto it = rsp_args.rbegin(); it != rsp_args.rend(); ++it) {
+                        to_process.insert(to_process.begin(), {*it, depth + 1});
+                    }
                 } else {
                     // File doesn't exist, pass through as-is
                     expanded.push_back(arg);
                 }
+            } catch (const std::exception&) {
+                // Re-throw std::exception (including our recursion depth error)
+                throw;
             } catch (...) {
                 // Path error or filesystem error, pass through as-is
                 expanded.push_back(arg);
@@ -1415,7 +1476,16 @@ static std::vector<std::string> expand_response_files(int argc, char* argv[]) {
 
 std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
     // Expand response files first
-    std::vector<std::string> expanded_argv = expand_response_files(argc, argv);
+    std::vector<std::string> expanded_argv;
+    try {
+        expanded_argv = expand_response_files(argc, argv);
+    } catch (const std::exception& e) {
+        // Response file parsing error (e.g., recursion depth exceeded, malformed file)
+        return std::nullopt;
+    } catch (...) {
+        // Unknown error during response file expansion
+        return std::nullopt;
+    }
     int expanded_argc = static_cast<int>(expanded_argv.size());
     
     CompileCommand cmd;

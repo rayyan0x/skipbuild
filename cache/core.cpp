@@ -1373,7 +1373,6 @@ static std::vector<std::string> parse_response_file(const std::filesystem::path&
             
             if (c == '"') {
                 in_quotes = !in_quotes;
-                current_arg += c;
                 continue;
             }
             

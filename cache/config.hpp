@@ -17,6 +17,7 @@ struct CacheConfig {
     int remote_connect_timeout_ms = 3000;
     int remote_read_timeout_ms = 3000;
     int remote_max_retries = 1;
+    bool disable_incremental_msbuild = true;  // Auto-disable for MSBuild incremental (output newer than source)
 };
 
 class ConfigParser {

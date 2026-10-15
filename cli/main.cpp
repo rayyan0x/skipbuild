@@ -50,21 +50,23 @@ void print_usage(const char* prog) {
     std::cerr << "  skipbuild --version                   # Show version\n";
     std::cerr << "\n";
     std::cerr << "Options:\n";
-    std::cerr << "  --remote-url <url>        Remote cache endpoint (e.g., http://cache:8080)\n";
-    std::cerr << "  --remote-read-only        Remote cache read-only mode\n";
-    std::cerr << "  --remote-timeout <ms>     Remote connect/read timeout in ms\n";
+    std::cerr << "  --remote-url <url>              Remote cache endpoint (e.g., http://cache:8080)\n";
+    std::cerr << "  --remote-read-only              Remote cache read-only mode\n";
+    std::cerr << "  --remote-timeout <ms>           Remote connect/read timeout in ms\n";
+    std::cerr << "  --disable-incremental-msbuild   Auto-disable for MSBuild incremental (true/false, default: true)\n";
     std::cerr << "\n";
     std::cerr << "Environment:\n";
-    std::cerr << "  BUILDCACHE_DIR              Cache directory\n";
-    std::cerr << "  BUILDCACHE_MAX_SIZE         Max cache size (e.g., 10G, 500M)\n";
-    std::cerr << "  BUILDCACHE_MAX_AGE          Max age in days\n";
-    std::cerr << "  BUILDCACHE_COMPRESSION      Enable/disable compression (true/false)\n";
-    std::cerr << "  BUILDCACHE_READ_ONLY        Read-only cache (true/false)\n";
-    std::cerr << "  BUILDCACHE_REMOTE_URL       Remote cache endpoint\n";
-    std::cerr << "  BUILDCACHE_REMOTE_READ_ONLY Remote read-only (true/false)\n";
-    std::cerr << "  BUILDCACHE_REMOTE_TIMEOUT   Remote timeout in ms\n";
-    std::cerr << "  SKIPBUILD_DISABLE=1            Disable cache (passthrough)\n";
-    std::cerr << "  SKIPBUILD_DEBUG=1              Debug logging\n";
+    std::cerr << "  BUILDCACHE_DIR                  Cache directory\n";
+    std::cerr << "  BUILDCACHE_MAX_SIZE             Max cache size (e.g., 10G, 500M)\n";
+    std::cerr << "  BUILDCACHE_MAX_AGE              Max age in days\n";
+    std::cerr << "  BUILDCACHE_COMPRESSION          Enable/disable compression (true/false)\n";
+    std::cerr << "  BUILDCACHE_READ_ONLY            Read-only cache (true/false)\n";
+    std::cerr << "  BUILDCACHE_REMOTE_URL           Remote cache endpoint\n";
+    std::cerr << "  BUILDCACHE_REMOTE_READ_ONLY     Remote read-only (true/false)\n";
+    std::cerr << "  BUILDCACHE_REMOTE_TIMEOUT       Remote timeout in ms\n";
+    std::cerr << "  BUILDCACHE_DISABLE_INCREMENTAL_MSBUILD  Auto-disable for MSBuild incremental (true/false)\n";
+    std::cerr << "  SKIPBUILD_DISABLE=1             Disable cache (passthrough)\n";
+    std::cerr << "  SKIPBUILD_DEBUG=1               Debug logging\n";
     std::cerr << "\n";
     std::cerr << "Config file (.buildcache.conf):\n";
     std::cerr << "  max_cache_size = 10G\n";
@@ -72,6 +74,7 @@ void print_usage(const char* prog) {
     std::cerr << "  compression_enabled = true\n";
     std::cerr << "  read_only = false\n";
     std::cerr << "  remote_url = http://...\n";
+    std::cerr << "  disable_incremental_msbuild = true\n";
 }
 
 skipbuild::CacheConfig load_cache_config(const fs::path& project_root = "") {
@@ -180,6 +183,11 @@ int main(int argc, char* argv[]) {
             cli_overrides->remote_read_timeout_ms = cli_overrides->remote_connect_timeout_ms;
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
+        } else if (arg == "--disable-incremental-msbuild" && i + 1 < argc) {
+            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
+            cli_overrides->disable_incremental_msbuild = skipbuild::ConfigParser::parse_bool(argv[++i]);
+            arg_consumed[i] = true;
+            arg_consumed[i-1] = true;
         }
     }
     
@@ -261,6 +269,62 @@ int main(int argc, char* argv[]) {
         std::vector<std::string> args(filtered_argv_data + 1, filtered_argv_data + filtered_argc);
         return run_compiler(args) ? 0 : 1;
     }
+
+    // Debug logging (moved earlier for MSBuild detection)
+    bool debug = std::getenv("SKIPBUILD_DEBUG");
+
+    // Auto-disable for MSBuild incremental builds (MSBuild native incremental is faster)
+    // Check if running under MSBuild and output is newer than source
+    if (config.disable_incremental_msbuild) {
+        bool is_msbuild = std::getenv("MSBUILD") != nullptr || 
+                          std::getenv("BuildingInsideVisualStudio") != nullptr ||
+                          std::getenv("MSBuildProjectDirectory") != nullptr;
+        
+        if (is_msbuild) {
+            // Check if this is a compile command with -c or /c
+            bool is_compile = false;
+            for (int i = 1; i < filtered_argc; ++i) {
+                std::string arg = filtered_argv_data[i];
+                if (arg == "-c" || arg == "/c") {
+                    is_compile = true;
+                    break;
+                }
+            }
+            
+            if (is_compile) {
+                // Try to find output file (/Fo or -o) and source file
+                std::string output_file;
+                std::string source_file;
+                for (int i = 1; i < filtered_argc; ++i) {
+                    std::string arg = filtered_argv_data[i];
+                    if ((arg == "/Fo" || arg == "-o") && i + 1 < filtered_argc) {
+                        output_file = filtered_argv_data[i + 1];
+                    } else if (arg.rfind("/Fo", 0) == 0) {
+                        output_file = arg.substr(3);
+                    } else if (arg.rfind("-o", 0) == 0 && arg.size() > 2) {
+                        output_file = arg.substr(2);
+                    } else if (fs::path(arg).extension() == ".cpp" || 
+                               fs::path(arg).extension() == ".cc" ||
+                               fs::path(arg).extension() == ".cxx" ||
+                               fs::path(arg).extension() == ".c") {
+                        source_file = arg;
+                    }
+                }
+                
+                if (!output_file.empty() && !source_file.empty()) {
+                    std::error_code ec;
+                    auto out_time = fs::last_write_time(output_file, ec);
+                    auto src_time = fs::last_write_time(source_file, ec);
+                    if (!ec && out_time > src_time) {
+                        // Output is newer than source - incremental build, skip cache
+                        if (debug) std::cerr << "[skipbuild] MSBuild incremental detected (output newer than source), bypassing cache\n";
+                        std::vector<std::string> args(filtered_argv_data + 1, filtered_argv_data + filtered_argc);
+                        return run_compiler(args) ? 0 : 1;
+                    }
+                }
+            }
+        }
+    }
     
     // Find separator "--"
     int sep = -1;
@@ -300,9 +364,6 @@ int main(int argc, char* argv[]) {
     std::string cmd_name = compiler_argv[0];
     std::string cmd_full = find_compiler_in_path(cmd_name);
     compiler_argv[0] = const_cast<char*>(cmd_full.c_str());
-    
-    // Debug logging
-    bool debug = std::getenv("SKIPBUILD_DEBUG");
     
     // Detect if this is a linker command
     auto linker_type = skipbuild::detect_linker_type(cmd_full);

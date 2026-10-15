@@ -135,6 +135,8 @@ void ConfigParser::apply_values(CacheConfig& config, const std::map<std::string,
             try {
                 config.remote_max_retries = std::stoi(value);
             } catch (...) {}
+        } else if (lower_key == "disable_incremental_msbuild" || lower_key == "disable_incremental") {
+            config.disable_incremental_msbuild = parse_bool(value);
         }
         // Unknown keys are silently ignored
     }
@@ -249,6 +251,10 @@ CacheConfig ConfigParser::load_config(
     
     if (const char* env = std::getenv("BUILDCACHE_REMOTE_MAX_RETRIES")) {
         try { config.remote_max_retries = std::stoi(env); } catch (...) {}
+    }
+    
+    if (const char* env = std::getenv("BUILDCACHE_DISABLE_INCREMENTAL_MSBUILD")) {
+        config.disable_incremental_msbuild = parse_bool(env);
     }
     
     // 5. Apply CLI overrides (highest priority)

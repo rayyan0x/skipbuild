@@ -630,8 +630,23 @@ CacheKey Cache::compute_key_from_command(const CompileCommand& cmd) {
     std::vector<std::string> norm_flags = cmd.flags;
     std::sort(norm_flags.begin(), norm_flags.end());
     
-    return compute_key(cmd.source, norm_includes, norm_flags, cmd.compiler_hash, 
-                       detect_compiler(cmd.compiler_path).type);
+    auto base_key = compute_key(cmd.source, norm_includes, norm_flags, cmd.compiler_hash, 
+                                detect_compiler(cmd.compiler_path).type);
+    
+    // Include PCH source content hash in the key if using PCH
+    if (cmd.pch.mode != PCHMode::None && !cmd.pch.pch_source.empty() && fs::exists(cmd.pch.pch_source)) {
+        std::string pch_hash = compute_file_hash(cmd.pch.pch_source);
+        if (!pch_hash.empty()) {
+            std::ostringstream oss;
+            oss << base_key.hash << "|pch:" << pch_hash;
+            CacheKey pch_key;
+            pch_key.hash = compute_sha256(oss.str());
+            pch_key.toolchain_id = base_key.toolchain_id;
+            return pch_key;
+        }
+    }
+    
+    return base_key;
 }
 
 // Generate unique temporary file path
@@ -1281,27 +1296,217 @@ CompilerInfo detect_compiler(const std::string& compiler_path) {
     return info;
 }
 
+// Parse response file (@file.rsp) - handles MSVC/Ninja/CMake format
+// Returns expanded arguments, or empty vector on error
+// depth: recursion depth for nested @file includes (max 10)
+static std::vector<std::string> parse_response_file(const std::filesystem::path& rsp_path, int depth = 0) {
+    constexpr int MAX_RECURSION_DEPTH = 10;
+    std::vector<std::string> expanded_args;
+    
+    if (depth > MAX_RECURSION_DEPTH) {
+        throw std::runtime_error("Response file recursion depth exceeded (max " + std::to_string(MAX_RECURSION_DEPTH) + ")");
+    }
+    
+    try {
+        std::ifstream file(rsp_path, std::ios::binary);
+        if (!file) return expanded_args;
+        
+        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        if (content.empty()) return expanded_args;
+        
+        // Limit content size to prevent issues
+        if (content.size() > 1024 * 1024) {
+            content = content.substr(0, 1024 * 1024);
+        }
+        
+        // Strip UTF-8 BOM if present (0xEF, 0xBB, 0xBF)
+        if (content.size() >= 3 &&
+            static_cast<unsigned char>(content[0]) == 0xEF &&
+            static_cast<unsigned char>(content[1]) == 0xBB &&
+            static_cast<unsigned char>(content[2]) == 0xBF) {
+            content = content.substr(3);
+        }
+        
+        // Normalize line endings: replace \r\n and \r with \n
+        // Then split by \n to process line by line, stripping trailing \r from each line
+        std::string normalized;
+        normalized.reserve(content.size());
+        for (size_t i = 0; i < content.size(); ++i) {
+            char c = content[i];
+            if (c == '\r') {
+                if (i + 1 < content.size() && content[i + 1] == '\n') {
+                    // CRLF -> skip \r, let \n be processed next iteration
+                    continue;
+                }
+                // Standalone \r -> treat as \n
+                normalized += '\n';
+            } else {
+                normalized += c;
+            }
+        }
+        
+        std::string current_arg;
+        bool in_quotes = false;
+        bool escape_next = false;
+        
+        for (size_t i = 0; i < normalized.size(); ++i) {
+            // Strict bounds check
+            if (i >= normalized.size()) break;
+            
+            char c = normalized[i];
+            
+            if (escape_next) {
+                current_arg += c;
+                escape_next = false;
+                continue;
+            }
+            
+            if (c == '\\') {
+                // Check if next char is quote (escaped quote) - strict bounds check
+                if (i + 1 < normalized.size() && normalized[i + 1] == '"') {
+                    escape_next = true;
+                    continue;
+                }
+                current_arg += c;
+                continue;
+            }
+            
+            if (c == '"') {
+                in_quotes = !in_quotes;
+                continue;
+            }
+            
+            if (!in_quotes && (c == ' ' || c == '\t' || c == '\n')) {
+                if (!current_arg.empty()) {
+                    // Strip any trailing \r that might remain (defensive)
+                    while (!current_arg.empty() && current_arg.back() == '\r') {
+                        current_arg.pop_back();
+                    }
+                    if (!current_arg.empty()) {
+                        expanded_args.push_back(current_arg);
+                    }
+                    current_arg.clear();
+                }
+                continue;
+            }
+            
+            current_arg += c;
+        }
+        
+        if (!current_arg.empty()) {
+            // Strip any trailing \r from final token
+            while (!current_arg.empty() && current_arg.back() == '\r') {
+                current_arg.pop_back();
+            }
+            if (!current_arg.empty()) {
+                expanded_args.push_back(current_arg);
+            }
+        }
+    } catch (const std::exception&) {
+        // Re-throw std::exception (including our recursion depth error)
+        throw;
+    } catch (...) {
+        // Return empty on any other error
+        return {};
+    }
+    
+    return expanded_args;
+}
+
+// Expand response files in argv recursively
+static std::vector<std::string> expand_response_files(int argc, char* argv[]) {
+    std::vector<std::string> expanded;
+    expanded.reserve(argc * 2);
+    
+    // Add compiler path (argv[0])
+    expanded.push_back(argv[0]);
+    
+    struct PendingArg {
+        std::string arg;
+        int depth;
+    };
+    
+    std::vector<PendingArg> to_process;
+    for (int i = 1; i < argc; ++i) {
+        to_process.push_back({argv[i], 0});
+    }
+    
+    constexpr int MAX_RECURSION_DEPTH = 10;
+    
+    while (!to_process.empty()) {
+        PendingArg current = to_process.front();
+        to_process.erase(to_process.begin());
+        
+        std::string arg = current.arg;
+        int depth = current.depth;
+        
+        if (arg.size() >= 2 && arg[0] == '@') {
+            // Response file argument
+            try {
+                std::filesystem::path rsp_path = arg.substr(1);
+                if (std::filesystem::exists(rsp_path)) {
+                    // Check depth before parsing
+                    if (depth >= MAX_RECURSION_DEPTH) {
+                        throw std::runtime_error("Response file recursion depth exceeded (max " + std::to_string(MAX_RECURSION_DEPTH) + ")");
+                    }
+                    auto rsp_args = parse_response_file(rsp_path, depth);
+                    // Prepend to to_process for recursive expansion with incremented depth
+                    for (auto it = rsp_args.rbegin(); it != rsp_args.rend(); ++it) {
+                        to_process.insert(to_process.begin(), {*it, depth + 1});
+                    }
+                } else {
+                    // File doesn't exist, pass through as-is
+                    expanded.push_back(arg);
+                }
+            } catch (const std::exception&) {
+                // Re-throw std::exception (including our recursion depth error)
+                throw;
+            } catch (...) {
+                // Path error or filesystem error, pass through as-is
+                expanded.push_back(arg);
+            }
+        } else {
+            expanded.push_back(arg);
+        }
+    }
+    
+    return expanded;
+}
+
 std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
+    // Expand response files first
+    std::vector<std::string> expanded_argv;
+    try {
+        expanded_argv = expand_response_files(argc, argv);
+    } catch (const std::exception& e) {
+        // Response file parsing error (e.g., recursion depth exceeded, malformed file)
+        return std::nullopt;
+    } catch (...) {
+        // Unknown error during response file expansion
+        return std::nullopt;
+    }
+    int expanded_argc = static_cast<int>(expanded_argv.size());
+    
     CompileCommand cmd;
     bool is_compile = false;
     
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
+    for (int i = 1; i < expanded_argc; ++i) {
+        std::string arg = expanded_argv[i];
         if (arg == "-c" || arg == "/c") {
             is_compile = true;
             cmd.args.push_back(arg);
-        } else if ((arg == "-o" || arg == "/Fo") && i + 1 < argc) {
-            cmd.output = argv[++i];
+        } else if ((arg == "-o" || arg == "/Fo") && i + 1 < expanded_argc) {
+            cmd.output = expanded_argv[++i];
             cmd.args.push_back(arg);
-            cmd.args.push_back(argv[i]);
+            cmd.args.push_back(expanded_argv[i]);
         } else if (arg.rfind("-I", 0) == 0 || arg.rfind("/I", 0) == 0) {
             std::string prefix = arg.rfind("-I", 0) == 0 ? "-I" : "/I";
             cmd.includes.push_back(arg.substr(prefix.size()));
             cmd.args.push_back(arg);
-        } else if ((arg == "-I" || arg == "/I") && i + 1 < argc) {
-            cmd.includes.push_back(argv[++i]);
+        } else if ((arg == "-I" || arg == "/I") && i + 1 < expanded_argc) {
+            cmd.includes.push_back(expanded_argv[++i]);
             cmd.args.push_back(arg);
-            cmd.args.push_back(argv[i]);
+            cmd.args.push_back(expanded_argv[i]);
         } else if (arg.rfind("-std=", 0) == 0 || arg.rfind("-O", 0) == 0 || arg.rfind("-g", 0) == 0 || arg.rfind("-Wall", 0) == 0 || arg.rfind("-W", 0) == 0) {
             cmd.flags.push_back(arg);
             cmd.args.push_back(arg);
@@ -1317,8 +1522,8 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
             std::string output_path = arg.substr(3);
             if (!output_path.empty()) {
                 cmd.output = output_path;
-            } else if (i + 1 < argc) {
-                cmd.output = argv[++i];
+            } else if (i + 1 < expanded_argc) {
+                cmd.output = expanded_argv[++i];
                 cmd.args.push_back(cmd.output.string());
             }
         } else if (arg == "-gsplit-dwarf") {
@@ -1333,6 +1538,55 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
                 cmd.expected_sidecars.push_back(dwo_path.string());
                 cmd.expected_sidecar_types.push_back(SidecarType::DWO);
             }
+        } else if (arg == "/Yc" || arg == "/Yu") {
+            // MSVC PCH: /Yc (create), /Yu (use)
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+            if (arg == "/Yc") {
+                cmd.pch.mode = PCHMode::Create;
+            } else {
+                cmd.pch.mode = PCHMode::Use;
+            }
+        } else if (arg.rfind("/Fp", 0) == 0) {
+            // MSVC PCH output/input file: /Fp<path> or /Fp <path>
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+            std::string pch_path = arg.substr(3);
+            if (!pch_path.empty()) {
+                cmd.pch.pch_output = pch_path;
+            } else if (i + 1 < expanded_argc) {
+                cmd.pch.pch_output = expanded_argv[++i];
+                cmd.args.push_back(cmd.pch.pch_output.string());
+            }
+        } else if (arg == "/Y-") {
+            // MSVC: disable PCH for this file
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+            cmd.pch.mode = PCHMode::None;
+        } else if (arg == "-x" && i + 1 < expanded_argc) {
+            // GCC/Clang: -x c++-header (create PCH)
+            std::string next_arg = expanded_argv[i + 1];
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+            if (next_arg == "c++-header" || next_arg == "c-header" || next_arg == "cpp-header") {
+                cmd.pch.mode = PCHMode::Create;
+                cmd.flags.push_back(next_arg);
+                cmd.args.push_back(next_arg);
+                ++i;
+            }
+        } else if (arg == "-include" && i + 1 < expanded_argc) {
+            // GCC/Clang: -include <header> (use PCH)
+            std::string include_file = expanded_argv[++i];
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+            cmd.flags.push_back(include_file);
+            cmd.args.push_back(include_file);
+            cmd.pch.mode = PCHMode::Use;
+            cmd.pch.pch_source = include_file;
+        } else if (arg.rfind("-fpch-preprocess", 0) == 0) {
+            // GCC/Clang: -fpch-preprocess (PCH related)
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
         } else if (arg.rfind("-g", 0) == 0) {
             // Generic debug flag (-g, -g3, etc.)
             cmd.flags.push_back(arg);
@@ -1353,7 +1607,7 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
         return std::nullopt;
     }
     
-    cmd.compiler_path = argv[0];
+    cmd.compiler_path = expanded_argv[0];
     auto info = detect_compiler(cmd.compiler_path);
     cmd.compiler_hash = info.hash;
 
@@ -1361,6 +1615,46 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
     if (info.type == CompilerType::MSVC && cmd.output.empty() && !cmd.source.empty()) {
         fs::path src_path(cmd.source);
         cmd.output = src_path.replace_extension(".obj");
+    }
+
+    // Infer PCH output paths if not specified
+    if (cmd.pch.mode == PCHMode::Create) {
+        if (info.type == CompilerType::MSVC) {
+            // MSVC default PCH output: <source_name>.pch (or via /Fp)
+            if (cmd.pch.pch_output.empty() && !cmd.source.empty()) {
+                fs::path src_path(cmd.source);
+                cmd.pch.pch_output = src_path.replace_extension(".pch");
+            }
+            // For MSVC /Yc, PCH source is typically a header like stdafx.h or pch.h
+            // We'll infer it from the source if not set, but ideally user specifies via /Yc"header.h"
+        } else if (info.type == CompilerType::GCC || info.type == CompilerType::Clang) {
+            // GCC/Clang default PCH output: <source_name>.gch
+            if (cmd.pch.pch_output.empty() && !cmd.source.empty()) {
+                fs::path src_path(cmd.source);
+                cmd.pch.pch_output = src_path.replace_extension(".gch");
+            }
+            // For -x c++-header, the source IS the header being precompiled
+            if (cmd.pch.pch_source.empty() && !cmd.source.empty()) {
+                cmd.pch.pch_source = cmd.source;
+            }
+        }
+    } else if (cmd.pch.mode == PCHMode::Use) {
+        if (info.type == CompilerType::MSVC) {
+            // MSVC /Yu: PCH input file (specified via /Fp)
+            if (cmd.pch.pch_output.empty()) {
+                // Default: same base as output but .pch
+                if (!cmd.output.empty()) {
+                    fs::path out_path(cmd.output);
+                    cmd.pch.pch_output = out_path.replace_extension(".pch");
+                }
+            }
+        } else if (info.type == CompilerType::GCC || info.type == CompilerType::Clang) {
+            // GCC/Clang -include: PCH input is typically <header>.gch
+            if (cmd.pch.pch_output.empty() && !cmd.pch.pch_source.empty()) {
+                fs::path hdr_path(cmd.pch.pch_source);
+                cmd.pch.pch_output = hdr_path.replace_extension(".gch");
+            }
+        }
     }
 
     // If debug info is enabled but no specific sidecar paths were set, infer them
@@ -1380,6 +1674,34 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
     }
     
     return cmd;
+}
+
+PCHInfo detect_pch_mode(const CompileCommand& cmd, CompilerType type) {
+    PCHInfo pch_info;
+    pch_info.mode = cmd.pch.mode;
+    pch_info.pch_source = cmd.pch.pch_source;
+    pch_info.pch_output = cmd.pch.pch_output;
+    
+    // Compute PCH content hash if source file exists
+    if (!pch_info.pch_source.empty() && std::filesystem::exists(pch_info.pch_source)) {
+        pch_info.pch_hash = compute_file_hash(pch_info.pch_source);
+    }
+    
+    return pch_info;
+}
+
+std::string compute_pch_hash(const std::filesystem::path& pch_file) {
+    if (std::filesystem::exists(pch_file)) {
+        return compute_file_hash(pch_file);
+    }
+    return "";
+}
+
+CacheKey compute_pch_key(const CompileCommand& cmd) {
+    // For PCH, we create a key based on the PCH source content + compiler flags
+    // This is used when the PCH itself is the primary output (Create mode)
+    auto info = detect_compiler(cmd.compiler_path);
+    return Cache::compute_key(cmd.pch.pch_source, cmd.includes, cmd.flags, cmd.compiler_hash, info.type);
 }
 
 std::vector<std::string> get_dependencies(char** argv, int argc) {

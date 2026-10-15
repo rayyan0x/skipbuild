@@ -66,7 +66,8 @@ void print_usage(const char* prog) {
     std::cerr << "  BUILDCACHE_REMOTE_TIMEOUT       Remote timeout in ms\n";
     std::cerr << "  BUILDCACHE_DISABLE_INCREMENTAL_MSBUILD  Auto-disable for MSBuild incremental (true/false)\n";
     std::cerr << "  SKIPBUILD_DISABLE=1             Disable cache (passthrough)\n";
-    std::cerr << "  SKIPBUILD_DEBUG=1               Debug logging\n";
+    std::cerr << "  SKIPBUILD_DEBUG=1               Debug logging (legacy)\n";
+    std::cerr << "  REMAKE_LOG=<level>              Log level: debug, info, warn, error, none (default: none)\n";
     std::cerr << "\n";
     std::cerr << "Config file (.buildcache.conf):\n";
     std::cerr << "  max_cache_size = 10G\n";
@@ -271,7 +272,9 @@ int main(int argc, char* argv[]) {
     }
 
     // Debug logging (moved earlier for MSBuild detection)
-    bool debug = std::getenv("SKIPBUILD_DEBUG");
+    // Use REMAKE_LOG environment variable for log level (debug/info/warn/error/none)
+    // SKIPBUILD_DEBUG=1 is still supported for backwards compatibility
+    bool debug = skipbuild::get_log_level() >= skipbuild::LogLevel::Debug;
 
     // Auto-disable for MSBuild incremental builds (MSBuild native incremental is faster)
     // Check if running under MSBuild and output is newer than source
@@ -317,7 +320,7 @@ int main(int argc, char* argv[]) {
                     auto src_time = fs::last_write_time(source_file, ec);
                     if (!ec && out_time > src_time) {
                         // Output is newer than source - incremental build, skip cache
-                        if (debug) std::cerr << "[skipbuild] MSBuild incremental detected (output newer than source), bypassing cache\n";
+                        skipbuild::log_debug("MSBuild incremental detected (output newer than source), bypassing cache");
                         std::vector<std::string> args(filtered_argv_data + 1, filtered_argv_data + filtered_argc);
                         return run_compiler(args) ? 0 : 1;
                     }
@@ -377,11 +380,9 @@ int main(int argc, char* argv[]) {
             return run_compiler(args);
         }
         
-        if (debug) {
-            std::cerr << "[skipbuild] Linker: " << link_cmd->linker_path << " (" << link_cmd->linker_hash.substr(0, 8) << ")\n";
-            std::cerr << "[skipbuild] Output: " << link_cmd->output << "\n";
-            std::cerr << "[skipbuild] Inputs: " << link_cmd->inputs.size() << "\n";
-        }
+        skipbuild::log_debug("Linker: " + link_cmd->linker_path + " (" + link_cmd->linker_hash.substr(0, 8) + ")");
+        skipbuild::log_debug("Output: " + link_cmd->output.string());
+        skipbuild::log_debug("Inputs: " + std::to_string(link_cmd->inputs.size()));
         
         // Get cache
         auto cache = skipbuild::Cache(config.cache_dir, config);
@@ -389,14 +390,12 @@ int main(int argc, char* argv[]) {
         // Compute linker key
         auto key = skipbuild::compute_linker_key(*link_cmd);
         
-        if (debug) {
-            std::cerr << "[skipbuild] Linker Key: " << key.hash.substr(0, 16) << "\n";
-        }
+        skipbuild::log_debug("Linker Key: " + key.hash.substr(0, 16));
         
         // Check cache with safe_get (fail-safe)
         auto entry = cache.safe_get(key);
         if (entry) {
-            if (debug) std::cerr << "[skipbuild] LINKER CACHE HIT\n";
+            skipbuild::log_debug("LINKER CACHE HIT");
             std::cout << "[skipbuild] LINK HIT " << key.hash.substr(0, 12) << "\n";
             
             // Restore output file(s)
@@ -406,17 +405,17 @@ int main(int argc, char* argv[]) {
                 fs::copy_file(cached_out, link_cmd->output, fs::copy_options::overwrite_existing, ec);
                 if (ec) {
                     restore_ok = false;
-                    if (debug) std::cerr << "[skipbuild] Failed to restore: " << ec.message() << "\n";
+                    skipbuild::log_debug("Failed to restore: " + ec.message());
                 }
-                if (debug) std::cerr << "[skipbuild] Restored: " << link_cmd->output << "\n";
+                skipbuild::log_debug("Restored: " + link_cmd->output.string());
             }
             if (restore_ok) return 0;
             // If restore failed, fall through to native execution
-            if (debug) std::cerr << "[skipbuild] Cache restore failed, falling back to native linker\n";
+            skipbuild::log_debug("Cache restore failed, falling back to native linker");
         }
         
         // Cache miss or restore failed - link natively
-        if (debug) std::cerr << "[skipbuild] LINKER CACHE MISS\n";
+        skipbuild::log_debug("LINKER CACHE MISS");
         std::cout << "[skipbuild] LINK MISS " << key.hash.substr(0, 12) << " -> linking...\n";
         
         auto start = std::chrono::high_resolution_clock::now();
@@ -430,7 +429,7 @@ int main(int argc, char* argv[]) {
             return exit_code;
         }
         
-        if (debug) std::cerr << "[skipbuild] Linked in " << ms << "ms\n";
+        skipbuild::log_debug("Linked in " + std::to_string(ms) + "ms");
         
         // Record direct execute for stats (fallback linking)
         cache.record_direct_execute();
@@ -448,7 +447,7 @@ int main(int argc, char* argv[]) {
         }
         if (!outputs.empty()) {
             cache.safe_put(key, outputs);
-            if (debug) std::cerr << "[skipbuild] Stored in cache (" << outputs.size() << " files)\n";
+            skipbuild::log_debug("Stored in cache (" + std::to_string(outputs.size()) + " files)");
         }
         
         return 0;
@@ -489,17 +488,15 @@ int main(int argc, char* argv[]) {
     auto key = skipbuild::Cache::compute_key_from_command(*cmd);
     
     // Debug logging
-    if (debug) {
-        std::cerr << "[skipbuild] Source: " << cmd->source << "\n";
-        std::cerr << "[skipbuild] Output: " << cmd->output << "\n";
-        std::cerr << "[skipbuild] Key: " << key.hash.substr(0, 16) << "\n";
-        std::cerr << "[skipbuild] Compiler: " << cmd->compiler_path << " (" << cmd->compiler_hash.substr(0, 8) << ")\n";
-    }
+    skipbuild::log_debug("Source: " + cmd->source.string());
+    skipbuild::log_debug("Output: " + cmd->output.string());
+    skipbuild::log_debug("Key: " + key.hash.substr(0, 16));
+    skipbuild::log_debug("Compiler: " + cmd->compiler_path + " (" + cmd->compiler_hash.substr(0, 8) + ")");
     
     // Check cache with safe_get (fail-safe)
     auto entry = cache.safe_get(key);
     if (entry) {
-        if (debug) std::cerr << "[skipbuild] CACHE HIT\n";
+        skipbuild::log_debug("CACHE HIT");
         std::cout << "[skipbuild] HIT " << key.hash.substr(0, 12) << "\n";
         
         // Restore output file(s)
@@ -515,9 +512,9 @@ int main(int argc, char* argv[]) {
             fs::copy_file(cached_out, target, fs::copy_options::overwrite_existing, ec);
             if (ec) {
                 restore_ok = false;
-                if (debug) std::cerr << "[skipbuild] Failed to restore: " << ec.message() << "\n";
+                skipbuild::log_debug("Failed to restore: " + ec.message());
             }
-            if (debug) std::cerr << "[skipbuild] Restored: " << target << "\n";
+            skipbuild::log_debug("Restored: " + target.string());
         }
         
         // Restore sidecar files
@@ -529,18 +526,18 @@ int main(int argc, char* argv[]) {
             fs::copy_file(sidecar.relative_path, target, fs::copy_options::overwrite_existing, ec);
             if (ec) {
                 restore_ok = false;
-                if (debug) std::cerr << "[skipbuild] Failed to restore sidecar: " << ec.message() << "\n";
+                skipbuild::log_debug("Failed to restore sidecar: " + ec.message());
             }
-            if (debug) std::cerr << "[skipbuild] Restored sidecar: " << target << "\n";
+            skipbuild::log_debug("Restored sidecar: " + target.string());
         }
         
         if (restore_ok) return 0;
         // If restore failed, fall through to native execution
-        if (debug) std::cerr << "[skipbuild] Cache restore failed, falling back to native compiler\n";
+        skipbuild::log_debug("Cache restore failed, falling back to native compiler");
     }
     
     // Cache miss or restore failed - compile natively
-    if (debug) std::cerr << "[skipbuild] CACHE MISS\n";
+    skipbuild::log_debug("CACHE MISS");
     std::cout << "[skipbuild] MISS " << key.hash.substr(0, 12) << " -> compiling...\n";
     
     auto start = std::chrono::high_resolution_clock::now();
@@ -554,7 +551,7 @@ int main(int argc, char* argv[]) {
         return exit_code;
     }
     
-    if (debug) std::cerr << "[skipbuild] Compiled in " << ms << "ms\n";
+    skipbuild::log_debug("Compiled in " + std::to_string(ms) + "ms");
     
     // Record direct execute for stats (fallback compilation)
     cache.record_direct_execute();
@@ -570,7 +567,7 @@ int main(int argc, char* argv[]) {
     // Also cache PCH file if creating one
     if (cmd->pch.mode == skipbuild::PCHMode::Create && !cmd->pch.pch_output.empty() && fs::exists(cmd->pch.pch_output)) {
         outputs.push_back(cmd->pch.pch_output);
-        if (debug) std::cerr << "[skipbuild] Caching PCH: " << cmd->pch.pch_output << "\n";
+        skipbuild::log_debug("Caching PCH: " + cmd->pch.pch_output.string());
     }
     
     // Collect debug sidecar files if debug info was requested
@@ -579,14 +576,14 @@ int main(int argc, char* argv[]) {
             fs::path sidecar_path = cmd->expected_sidecars[i];
             if (fs::exists(sidecar_path)) {
                 sidecars.emplace_back(sidecar_path, cmd->expected_sidecar_types[i]);
-                if (debug) std::cerr << "[skipbuild] Caching sidecar: " << sidecar_path << "\n";
+                skipbuild::log_debug("Caching sidecar: " + sidecar_path.string());
             }
         }
     }
     
     if (!outputs.empty()) {
         cache.safe_put(key, outputs, sidecars);
-        if (debug) std::cerr << "[skipbuild] Stored in cache (" << outputs.size() << " outputs, " << sidecars.size() << " sidecars)\n";
+        skipbuild::log_debug("Stored in cache (" + std::to_string(outputs.size()) + " outputs, " + std::to_string(sidecars.size()) + " sidecars)");
     }
     
     return 0;

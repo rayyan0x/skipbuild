@@ -356,4 +356,20 @@ struct NetworkTimeoutConfig {
     int max_retries = 1;             // Minimal retries for fail-fast
 };
 
+// Logging
+enum class LogLevel {
+    None = 0,
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+    Debug = 4
+};
+
+LogLevel get_log_level();
+void log_message(LogLevel level, const std::string& message);
+void log_debug(const std::string& message);
+void log_info(const std::string& message);
+void log_warn(const std::string& message);
+void log_error(const std::string& message);
+
 } // namespace skipbuild

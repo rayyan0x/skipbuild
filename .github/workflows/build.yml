@@ -62,6 +62,40 @@ jobs:
         with:
           path: dist
 
+      # Each build job uploads a binary literally named "skipbuild"/"skipbuild.exe",
+      # so uploading dist/**/* would collide and leave only two assets. Rename to
+      # canonical per-platform names and emit SHA256SUMS for the install scripts.
+      - name: Normalize release assets
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          for d in dist/*/; do
+            name="$(basename "$d")"
+            bin=""
+            for f in "$d"*; do
+              [ -f "$f" ] && bin="$f" && break
+            done
+            [ -n "$bin" ] || continue
+            case "$name" in
+              *Windows*ARM64*)              out="skipbuild-windows-arm64.exe" ;;
+              *Windows*)                    out="skipbuild-windows-x64.exe" ;;
+              *ARM64*) case "$name" in
+                         *[Mm]ac*|*Darwin*) out="skipbuild-macos-arm64" ;;
+                         *)                 out="skipbuild-linux-arm64" ;;
+                       esac ;;
+              *)       case "$name" in
+                         *[Mm]ac*|*Darwin*) out="skipbuild-macos-x64" ;;
+                         *)                 out="skipbuild-linux-x64" ;;
+                       esac ;;
+            esac
+            cp "$bin" "out/$out"
+            printf '%s -> %s\n' "$name" "$out"
+          done
+          cd out
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/*
+          files: out/*
+          generate_release_notes: true

@@ -2154,7 +2154,7 @@ static std::string compute_sha256_winhttp(const std::vector<uint8_t>& data) {
 
 class WinHttpClient {
     WinHttpHandle session_;
-    std::wstring user_agent_ = L"remake/0.1.0";
+    std::wstring user_agent_ = L"remake/" SKIPBUILD_WVERSION;
     int connect_timeout_ms_ = 3000;
     int read_timeout_ms_ = 3000;
     bool verify_ssl_ = true;
@@ -2304,7 +2304,7 @@ public:
 // POSIX socket HTTP client for Linux/macOS
 class PosixHttpClient {
     int socket_fd_ = -1;
-    std::string user_agent_ = "remake/0.1.0";
+    std::string user_agent_ = "remake/" SKIPBUILD_VERSION;
     int connect_timeout_ms_ = 3000;
     int read_timeout_ms_ = 3000;
     bool verify_ssl_ = true;  // Not used for POSIX (no SSL support in raw sockets)
@@ -2788,33 +2788,38 @@ RemoteCache::RemoteStats RemoteCache::get_stats() const {
 RemoteCache::Config RemoteCache::from_env() {
     Config config;
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_URL")) {
+    auto get_env = [](const char* skipbuild_var, const char* buildcache_var) -> const char* {
+        if (const char* v = std::getenv(skipbuild_var)) return v;
+        return std::getenv(buildcache_var);
+    };
+    
+    if (const char* env = get_env("SKIPBUILD_REMOTE_URL", "BUILDCACHE_REMOTE_URL")) {
         config.url = env;
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_READ_ONLY")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_READ_ONLY", "BUILDCACHE_REMOTE_READ_ONLY")) {
         std::string v = env;
         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
         config.read_only = (v == "1" || v == "true" || v == "yes" || v == "on");
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_CONNECT_TIMEOUT")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_CONNECT_TIMEOUT", "BUILDCACHE_REMOTE_CONNECT_TIMEOUT")) {
         try { config.connect_timeout_ms = std::stoi(env); } catch (...) {}
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_READ_TIMEOUT")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_READ_TIMEOUT", "BUILDCACHE_REMOTE_READ_TIMEOUT")) {
         try { config.read_timeout_ms = std::stoi(env); } catch (...) {}
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_MAX_RETRIES")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_MAX_RETRIES", "BUILDCACHE_REMOTE_MAX_RETRIES")) {
         try { config.max_retries = std::stoi(env); } catch (...) {}
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_AUTH_HEADER")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_AUTH_HEADER", "BUILDCACHE_REMOTE_AUTH_HEADER")) {
         config.auth_header = env;
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_VERIFY_SSL")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_VERIFY_SSL", "BUILDCACHE_REMOTE_VERIFY_SSL")) {
         std::string v = env;
         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
         config.verify_ssl = (v == "1" || v == "true" || v == "yes" || v == "on");
@@ -2832,5 +2837,91 @@ bool RemoteCache::test_connection() const {
     std::string error;
     return impl_->client_->head(*impl_->parsed_base_url_, status_code, error);
 }
+
+// Logging implementation
+namespace {
+    LogLevel g_log_level = LogLevel::None;
+    std::once_flag g_log_init_flag;
+    bool g_is_vs_build = false;
+    std::once_flag g_vs_check_flag;
+
+    void check_vs_build() {
+        // Check if running under Visual Studio / MSBuild
+        g_is_vs_build = (std::getenv("BuildingInsideVisualStudio") != nullptr) ||
+                        (std::getenv("MSBuildProjectDirectory") != nullptr) ||
+                        (std::getenv("MSBUILD") != nullptr) ||
+                        (std::getenv("VisualStudioVersion") != nullptr);
+    }
+} // namespace
+
+void init_log_level() {
+    const char* env = std::getenv("REMAKE_LOG");
+    if (!env) {
+        env = std::getenv("SKIPBUILD_DEBUG");
+        if (env && (std::string(env) == "1" || std::string(env) == "true" || std::string(env) == "yes" || std::string(env) == "on")) {
+            g_log_level = LogLevel::Debug;
+            return;
+        }
+        g_log_level = LogLevel::None;
+        return;
+    }
+
+    std::string level = env;
+    std::transform(level.begin(), level.end(), level.begin(), ::tolower);
+    if (level == "debug" || level == "4") {
+        g_log_level = LogLevel::Debug;
+    } else if (level == "info" || level == "3") {
+        g_log_level = LogLevel::Info;
+    } else if (level == "warn" || level == "warning" || level == "2") {
+        g_log_level = LogLevel::Warn;
+    } else if (level == "error" || level == "1") {
+        g_log_level = LogLevel::Error;
+    } else if (level == "none" || level == "off" || level == "0") {
+        g_log_level = LogLevel::None;
+    } else {
+        g_log_level = LogLevel::None;
+    }
+}
+
+LogLevel get_log_level() {
+    std::call_once(g_log_init_flag, init_log_level);
+    return g_log_level;
+}
+
+bool is_vs_build() {
+    std::call_once(g_vs_check_flag, check_vs_build);
+    return g_is_vs_build;
+}
+
+void log_message(LogLevel level, const std::string& message) {
+    if (static_cast<int>(level) <= static_cast<int>(get_log_level())) {
+        const char* prefix = "";
+        switch (level) {
+            case LogLevel::Error: prefix = "[skipbuild ERROR] "; break;
+            case LogLevel::Warn:  prefix = "[skipbuild WARN]  "; break;
+            case LogLevel::Info:  prefix = "[skipbuild INFO]  "; break;
+            case LogLevel::Debug: prefix = "[skipbuild DEBUG] "; break;
+            default: break;
+        }
+        std::string full_msg = std::string(prefix) + message;
+        
+        // Always output to stderr
+        std::cerr << full_msg << "\n";
+        
+        // Also send to Visual Studio Output window when running under VS/MSBuild
+#ifdef _WIN32
+        if (is_vs_build()) {
+            std::wstring wmsg(full_msg.begin(), full_msg.end());
+            wmsg += L"\n";
+            OutputDebugStringW(wmsg.c_str());
+        }
+#endif
+    }
+}
+
+void log_debug(const std::string& message) { log_message(LogLevel::Debug, message); }
+void log_info(const std::string& message) { log_message(LogLevel::Info, message); }
+void log_warn(const std::string& message) { log_message(LogLevel::Warn, message); }
+void log_error(const std::string& message) { log_message(LogLevel::Error, message); }
 
 } // namespace skipbuild

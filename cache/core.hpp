@@ -10,6 +10,15 @@
 #include "config.hpp"
 #include "stats.hpp"
 
+// Defined by the build system from the CMake project version.
+// Fallback keeps non-CMake builds compiling without hardcoding a version.
+#ifndef SKIPBUILD_VERSION
+#define SKIPBUILD_VERSION "unknown"
+#endif
+#ifndef SKIPBUILD_WVERSION
+#define SKIPBUILD_WVERSION L"unknown"
+#endif
+
 namespace skipbuild {
 
 // Cross-platform file locking for inter-process synchronization
@@ -355,5 +364,21 @@ struct NetworkTimeoutConfig {
     int read_timeout_ms = 3000;      // 3 seconds
     int max_retries = 1;             // Minimal retries for fail-fast
 };
+
+// Logging
+enum class LogLevel {
+    None = 0,
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+    Debug = 4
+};
+
+LogLevel get_log_level();
+void log_message(LogLevel level, const std::string& message);
+void log_debug(const std::string& message);
+void log_info(const std::string& message);
+void log_warn(const std::string& message);
+void log_error(const std::string& message);
 
 } // namespace skipbuild

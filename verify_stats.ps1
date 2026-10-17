@@ -4,7 +4,7 @@
     Verifies remake.exe statistics tracking works end-to-end via CLI.
 .DESCRIPTION
     Creates a temp C++ file, runs remake twice (miss then hit), and verifies stats.
-    Uses BUILDCACHE_DIR environment variable for cache directory.
+    Uses the SKIPBUILD_DIR environment variable (or legacy BUILDCACHE_DIR) for cache directory.
 #>
 
 $ErrorActionPreference = "Stop"

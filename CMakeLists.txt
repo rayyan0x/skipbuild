@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(skipbuild LANGUAGES CXX VERSION 0.1.0)
+project(skipbuild LANGUAGES CXX VERSION 0.2.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,7 +38,11 @@ if(ZSTD_INCLUDE_DIRS)
 endif()
 
 target_link_libraries(remake_core PUBLIC ${REMAKE_ZSTD_TARGET})
-target_compile_definitions(remake_core PUBLIC REMAKE_HAVE_ZSTD=1)
+target_compile_definitions(remake_core PUBLIC
+    REMAKE_HAVE_ZSTD=1
+    SKIPBUILD_VERSION="${PROJECT_VERSION}"
+    SKIPBUILD_WVERSION=L"${PROJECT_VERSION}"
+)
 
 # CLI tool
 add_executable(skipbuild cli/main.cpp)

@@ -210,7 +210,7 @@ The cache key is a SHA-256 over:
 3. **Sorted compiler flags** — all flags except output/file args, sorted for determinism
 4. **Compiler binary hash** — SHA-256 of `cl.exe`, `g++`, `clang++`
 5. **Compiler type + version** — e.g., `MSVC 19.51.36260`, `GCC 13.3`
-6. **Relevant environment** — `BUILDCACHE_*`, `SKIPBUILD_*`
+6. **Relevant environment** — `SKIPBUILD_*`
 
 ### Hit / Miss / Store Flow
 
@@ -269,25 +269,25 @@ compile command
 
 | Setting | CLI Flag | Environment Variable | Config Key | Default |
 |---|---|---|---|---|
-| Cache directory | `--cache-dir <path>` | `BUILDCACHE_DIR` / `BUILDCACHE_CACHE_DIR` | `cache_dir` | `~/.cache/buildcache` |
-| Max cache size | `--max-cache-size <size>` | `BUILDCACHE_MAX_SIZE` | `max_cache_size` | `5G` |
-| Max age (days) | `--max-age <days>` | `BUILDCACHE_MAX_AGE` | `max_age` | `30` |
-| Eviction ratio | — | `BUILDCACHE_EVICTION_RATIO` | `eviction_ratio` | `0.85` |
-| Compression | `--compression <bool>` | `BUILDCACHE_COMPRESSION` | `compression_enabled` | `true` |
-| Read-only | `--read-only <bool>` | `BUILDCACHE_READ_ONLY` | `read_only` | `false` |
-| Remote URL | — | `BUILDCACHE_REMOTE_URL` | `remote_url` | — |
-| Remote connect timeout (ms) | — | `BUILDCACHE_REMOTE_CONNECT_TIMEOUT` | `remote_connect_timeout` | `3000` |
-| Remote read timeout (ms) | — | `BUILDCACHE_REMOTE_READ_TIMEOUT` | `remote_read_timeout` | `3000` |
-| Remote max retries | — | `BUILDCACHE_REMOTE_MAX_RETRIES` | `remote_max_retries` | `1` |
-| Remote auth header | — | `BUILDCACHE_REMOTE_AUTH_HEADER` | `remote_auth_header` | — |
-| Remote verify SSL | — | `BUILDCACHE_REMOTE_VERIFY_SSL` | `remote_verify_ssl` | `true` |
+| Cache directory | `--cache-dir <path>` | `SKIPBUILD_DIR` / `SKIPBUILD_CACHE_DIR` | `cache_dir` | `~/.cache/skipbuild` |
+| Max cache size | `--max-cache-size <size>` | `SKIPBUILD_MAX_SIZE` | `max_cache_size` | `5G` |
+| Max age (days) | `--max-age <days>` | `SKIPBUILD_MAX_AGE` | `max_age` | `30` |
+| Eviction ratio | — | `SKIPBUILD_EVICTION_RATIO` | `eviction_ratio` | `0.85` |
+| Compression | `--compression <bool>` | `SKIPBUILD_COMPRESSION` | `compression_enabled` | `true` |
+| Read-only | `--read-only <bool>` | `SKIPBUILD_READ_ONLY` | `read_only` | `false` |
+| Remote URL | — | `SKIPBUILD_REMOTE_URL` | `remote_url` | — |
+| Remote connect timeout (ms) | — | `SKIPBUILD_REMOTE_CONNECT_TIMEOUT` | `remote_connect_timeout` | `3000` |
+| Remote read timeout (ms) | — | `SKIPBUILD_REMOTE_READ_TIMEOUT` | `remote_read_timeout` | `3000` |
+| Remote max retries | — | `SKIPBUILD_REMOTE_MAX_RETRIES` | `remote_max_retries` | `1` |
+| Remote auth header | — | `SKIPBUILD_REMOTE_AUTH_HEADER` | `remote_auth_header` | — |
+| Remote verify SSL | — | `SKIPBUILD_REMOTE_VERIFY_SSL` | `remote_verify_ssl` | `true` |
 | Disable cache | — | `SKIPBUILD_DISABLE=1` | — | `false` |
-| Debug logging | — | `SKIPBUILD_DEBUG=1` | — | `false` |
+| Log level | — | `REMAKE_LOG=debug\|info\|warn\|error\|none` | — | `none` |
 
-> **Note:** Tool is `skipbuild` but uses `BUILDCACHE_*` env vars (legacy). `SKIPBUILD_*` only for `DISABLE`/`DEBUG`.
+> **Note:** The legacy `BUILDCACHE_*` prefix is still accepted as a fallback, but `SKIPBUILD_*` is preferred. `SKIPBUILD_DEBUG=1` is supported as a shortcut for `REMAKE_LOG=debug`.
 
 **Config file locations (priority order):**
-1. `BUILDCACHE_CONFIG` env var
+1. `SKIPBUILD_CONFIG` env var (or legacy `BUILDCACHE_CONFIG`)
 2. `.buildcache.conf` (project root)
 3. `.buildcache/config` (project root)
 4. Windows: `%APPDATA%\buildcache\config` / `%USERPROFILE%\.buildcache\config`
@@ -323,9 +323,9 @@ Options:
 |---|---|
 | `--stats` | Hits, misses, hit rate, bytes/time saved, entry count, total size |
 | `--clear-stats` | Resets statistics to zero |
-| `--clean` | Removes all cache entries (`rm -rf ~/.cache/buildcache`) |
+| `--clean` | Removes all cache entries (`rm -rf ~/.cache/skipbuild`) |
 
-**Cache directory:** `~/.cache/buildcache` (Windows: `%LOCALAPPDATA%\buildcache`)  
+**Cache directory:** `~/.cache/skipbuild` (Windows: `%LOCALAPPDATA%\skipbuild`)  
 **Size limit:** 5 GB default, 85% target, LRU + max-age (30 days) eviction
 
 ---
@@ -336,18 +336,18 @@ skipbuild supports remote caching via HTTP/S3-compatible APIs. Configure with:
 
 | Setting | Environment Variable | Config Key |
 |---|---|---|
-| Remote URL | `BUILDCACHE_REMOTE_URL` | `remote_url` |
-| Connect timeout (ms) | `BUILDCACHE_REMOTE_CONNECT_TIMEOUT` | `remote_connect_timeout` |
-| Read timeout (ms) | `BUILDCACHE_REMOTE_READ_TIMEOUT` | `remote_read_timeout` |
-| Max retries | `BUILDCACHE_REMOTE_MAX_RETRIES` | `remote_max_retries` |
-| Auth header | `BUILDCACHE_REMOTE_AUTH_HEADER` | `remote_auth_header` |
-| Verify SSL | `BUILDCACHE_REMOTE_VERIFY_SSL` | `remote_verify_ssl` |
+| Remote URL | `SKIPBUILD_REMOTE_URL` | `remote_url` |
+| Connect timeout (ms) | `SKIPBUILD_REMOTE_CONNECT_TIMEOUT` | `remote_connect_timeout` |
+| Read timeout (ms) | `SKIPBUILD_REMOTE_READ_TIMEOUT` | `remote_read_timeout` |
+| Max retries | `SKIPBUILD_REMOTE_MAX_RETRIES` | `remote_max_retries` |
+| Auth header | `SKIPBUILD_REMOTE_AUTH_HEADER` | `remote_auth_header` |
+| Verify SSL | `SKIPBUILD_REMOTE_VERIFY_SSL` | `remote_verify_ssl` |
 
 **Example (S3-compatible):**
 ```bash
-export BUILDCACHE_REMOTE_URL="http://127.0.0.1:9000/my-bucket"
-export BUILDCACHE_REMOTE_AUTH_HEADER="Authorization: Bearer my-token"
-export BUILDCACHE_REMOTE_VERIFY_SSL=false
+export SKIPBUILD_REMOTE_URL="http://127.0.0.1:9000/my-bucket"
+export SKIPBUILD_REMOTE_AUTH_HEADER="Authorization: Bearer my-token"
+export SKIPBUILD_REMOTE_VERIFY_SSL=false
 skipbuild -- cl.exe /c hello.cpp /Fohello.obj
 ```
 
@@ -413,10 +413,10 @@ python s3_mock.py
 
 ### 2. Configure skipbuild to Use the Mock Server
 ```powershell
-$env:BUILDCACHE_REMOTE_URL = "http://127.0.0.1:9000/test-bucket"
-$env:BUILDCACHE_REMOTE_VERIFY_SSL = "false"
-$env:BUILDCACHE_REMOTE_CONNECT_TIMEOUT = "2000"
-$env:BUILDCACHE_REMOTE_READ_TIMEOUT = "2000"
+$env:SKIPBUILD_REMOTE_URL = "http://127.0.0.1:9000/test-bucket"
+$env:SKIPBUILD_REMOTE_VERIFY_SSL = "false"
+$env:SKIPBUILD_REMOTE_CONNECT_TIMEOUT = "2000"
+$env:SKIPBUILD_REMOTE_READ_TIMEOUT = "2000"
 ```
 
 ### 3. Test the Cache Loop
@@ -453,9 +453,9 @@ Configure & Test in Terminal 2:
 
 ```powershell
 # Point to your S3 remote cache endpoint
-$env:BUILDCACHE_REMOTE_URL = "http://127.0.0.1:9000/skipbuild-cache"
-$env:BUILDCACHE_COMPRESSION = "true"
-$env:SKIPBUILD_DEBUG = "1"
+$env:SKIPBUILD_REMOTE_URL = "http://127.0.0.1:9000/skipbuild-cache"
+$env:SKIPBUILD_COMPRESSION = "true"
+$env:REMAKE_LOG = "debug"
 
 # Run a test compilation (example using MSVC)
 .\skipbuild.exe cl /c hello.cpp /Fohello.obj
@@ -470,7 +470,7 @@ $env:SKIPBUILD_DEBUG = "1"
 **Yes, absolutely.** This architecture is built precisely for team environments and large-scale codebases. Here is why it scales:
 
 1. **Shared Team Remote Caching:**
-   Instead of pointing `BUILDCACHE_REMOTE_URL` to a local mock server, production teams point it to a **shared S3 bucket** (like AWS S3, Cloudflare R2, MinIO cluster, or Google Cloud Storage via S3-compat APIs).
+   Instead of pointing `SKIPBUILD_REMOTE_URL` to a local mock server, production teams point it to a **shared S3 bucket** (like AWS S3, Cloudflare R2, MinIO cluster, or Google Cloud Storage via S3-compat APIs).
    * When **Developer A** compiles a large codebase for the first time, the objects are pushed to the central S3 bucket.
    * When **Developer B** (or a CI/CD pipeline like GitHub Actions) builds the exact same code changes later, they pull the pre-compiled objects instantly via **Cache Hit**, cutting build times down to seconds.
 
@@ -489,9 +489,9 @@ $env:SKIPBUILD_DEBUG = "1"
 | Cache always misses | Compiler not in PATH, different path each run | Use full path; ensure same compiler binary |
 | Wrong compiler detected | Called without `--` separator | Use `skipbuild -- cl.exe ...` |
 | Stale objects after compiler upgrade | Compiler hash not captured | Upgrade invalidates automatically via binary hash |
-| Permission errors on cache | Cache dir not writable | Set `BUILDCACHE_DIR` to writable path; check `--clean` |
+| Permission errors on cache | Cache dir not writable | Set `SKIPBUILD_DIR` to writable path; check `--clean` |
 | MSVC PDB not restored | `/Zi` but PDB path not tracked | Ensure `/Fo` specifies output; PDB inferred from `.obj` |
-| `--cache-dir` doesn't work | It prints, doesn't set | Use `BUILDCACHE_DIR` env or config file |
+| `--cache-dir` doesn't work | It prints, doesn't set | Use `SKIPBUILD_DIR` env or config file |
 
 ### Limitations
 
@@ -504,7 +504,7 @@ $env:SKIPBUILD_DEBUG = "1"
 | Windows/Linux ARM64 | Not tested — code is portable, no CI coverage |
 | FreeBSD / other BSDs | Not tested — POSIX paths should work, no CI |
 | Distributed builds (distcc/icecream) | Not tested |
-| VS generator | Launcher set but no visible `[skipbuild]` output |
+| VS generator logging | `[skipbuild]` output goes to stderr, not the MSBuild console log. Set `REMAKE_LOG=debug` and view the **Output → Debug** window in VS (uses `OutputDebugString`). |
 
 ---
 
@@ -512,8 +512,8 @@ $env:SKIPBUILD_DEBUG = "1"
 
 **Security:**
 - Cache stores: compiler output (`.obj`/`.o`), debug sidecars (`.pdb`, `.idb`, `.dwo`), metadata (key, toolchain hash, timestamps). No source code.
-- Disk: zstd level 3 compressed blobs in `~/.cache/buildcache/aa/bb/<hash>/` with `meta.json`
-- Remote auth: Header-based (`BUILDCACHE_REMOTE_AUTH_HEADER`) — do not expose to untrusted networks without TLS
+- Disk: zstd level 3 compressed blobs in `~/.cache/skipbuild/aa/bb/<hash>/` with `meta.json`
+- Remote auth: Header-based (`SKIPBUILD_REMOTE_AUTH_HEADER`) — do not expose to untrusted networks without TLS
 - Reporting: See [SECURITY.md](SECURITY.md)
 
 **Testing:**

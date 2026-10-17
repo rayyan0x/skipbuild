@@ -144,13 +144,27 @@ void ConfigParser::apply_values(CacheConfig& config, const std::map<std::string,
 
 fs::path ConfigParser::find_global_config() {
     // Check environment variable first
+    if (const char* env = std::getenv("SKIPBUILD_CONFIG")) {
+        fs::path p(env);
+        if (fs::exists(p)) return p;
+    }
+    // Legacy support
     if (const char* env = std::getenv("BUILDCACHE_CONFIG")) {
         fs::path p(env);
         if (fs::exists(p)) return p;
     }
     
-    // Platform-specific default locations
+    // Platform-specific default locations (preferred: skipbuild)
     #ifdef _WIN32
+    if (const char* home = std::getenv("USERPROFILE")) {
+        fs::path p = fs::path(home) / ".skipbuild" / "config";
+        if (fs::exists(p)) return p;
+    }
+    if (const char* appdata = std::getenv("APPDATA")) {
+        fs::path p = fs::path(appdata) / "skipbuild" / "config";
+        if (fs::exists(p)) return p;
+    }
+    // Legacy locations
     if (const char* home = std::getenv("USERPROFILE")) {
         fs::path p = fs::path(home) / ".buildcache" / "config";
         if (fs::exists(p)) return p;
@@ -161,10 +175,18 @@ fs::path ConfigParser::find_global_config() {
     }
     #else
     if (const char* home = std::getenv("HOME")) {
+        fs::path p = fs::path(home) / ".config" / "skipbuild" / "config";
+        if (fs::exists(p)) return p;
+    }
+    if (const char* home = std::getenv("HOME")) {
+        fs::path p = fs::path(home) / ".skipbuild" / "config";
+        if (fs::exists(p)) return p;
+    }
+    // Legacy locations
+    if (const char* home = std::getenv("HOME")) {
         fs::path p = fs::path(home) / ".config" / "buildcache" / "config";
         if (fs::exists(p)) return p;
     }
-    // Fallback to legacy location
     if (const char* home = std::getenv("HOME")) {
         fs::path p = fs::path(home) / ".buildcache" / "config";
         if (fs::exists(p)) return p;
@@ -177,11 +199,18 @@ fs::path ConfigParser::find_global_config() {
 fs::path ConfigParser::find_project_config(const fs::path& project_root) {
     if (project_root.empty()) return "";
     
-    fs::path p = fs::weakly_canonical(project_root) / ".buildcache.conf";
+    fs::path root = fs::weakly_canonical(project_root);
+    
+    // Preferred: .skipbuild.conf / .skipbuild/config
+    fs::path p = root / ".skipbuild.conf";
+    if (fs::exists(p)) return p;
+    p = root / ".skipbuild" / "config";
     if (fs::exists(p)) return p;
     
-    // Also check for .buildcache/config in project root
-    p = fs::weakly_canonical(project_root) / ".buildcache" / "config";
+    // Legacy: .buildcache.conf / .buildcache/config
+    p = root / ".buildcache.conf";
+    if (fs::exists(p)) return p;
+    p = root / ".buildcache" / "config";
     if (fs::exists(p)) return p;
     
     return "";
@@ -210,50 +239,55 @@ CacheConfig ConfigParser::load_config(
     }
     
     // 4. Apply environment variable overrides
-    // BUILDCACHE_DIR / BUILDCACHE_CACHE_DIR
-    if (const char* env = std::getenv("BUILDCACHE_DIR")) {
+    // Support both SKIPBUILD_* (preferred) and BUILDCACHE_* (legacy) prefixes
+    auto get_env = [](const char* skipbuild_var, const char* buildcache_var) -> const char* {
+        if (const char* v = std::getenv(skipbuild_var)) return v;
+        return std::getenv(buildcache_var);
+    };
+    
+    if (const char* env = get_env("SKIPBUILD_DIR", "BUILDCACHE_DIR")) {
         config.cache_dir = env;
-    } else if (const char* env = std::getenv("BUILDCACHE_CACHE_DIR")) {
+    } else if (const char* env = get_env("SKIPBUILD_CACHE_DIR", "BUILDCACHE_CACHE_DIR")) {
         config.cache_dir = env;
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_MAX_SIZE")) {
+    if (const char* env = get_env("SKIPBUILD_MAX_SIZE", "BUILDCACHE_MAX_SIZE")) {
         config.max_cache_size_bytes = parse_size(env);
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_MAX_AGE")) {
+    if (const char* env = get_env("SKIPBUILD_MAX_AGE", "BUILDCACHE_MAX_AGE")) {
         try { config.max_age_days = std::stoi(env); } catch (...) {}
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_EVICTION_RATIO")) {
+    if (const char* env = get_env("SKIPBUILD_EVICTION_RATIO", "BUILDCACHE_EVICTION_RATIO")) {
         try { config.eviction_target_ratio = std::stod(env); } catch (...) {}
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_COMPRESSION")) {
+    if (const char* env = get_env("SKIPBUILD_COMPRESSION", "BUILDCACHE_COMPRESSION")) {
         config.compression_enabled = parse_bool(env);
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_READ_ONLY")) {
+    if (const char* env = get_env("SKIPBUILD_READ_ONLY", "BUILDCACHE_READ_ONLY")) {
         config.read_only = parse_bool(env);
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_URL")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_URL", "BUILDCACHE_REMOTE_URL")) {
         config.remote_url = env;
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_CONNECT_TIMEOUT")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_CONNECT_TIMEOUT", "BUILDCACHE_REMOTE_CONNECT_TIMEOUT")) {
         try { config.remote_connect_timeout_ms = std::stoi(env); } catch (...) {}
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_READ_TIMEOUT")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_READ_TIMEOUT", "BUILDCACHE_REMOTE_READ_TIMEOUT")) {
         try { config.remote_read_timeout_ms = std::stoi(env); } catch (...) {}
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_MAX_RETRIES")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_MAX_RETRIES", "BUILDCACHE_REMOTE_MAX_RETRIES")) {
         try { config.remote_max_retries = std::stoi(env); } catch (...) {}
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_DISABLE_INCREMENTAL_MSBUILD")) {
+    if (const char* env = get_env("SKIPBUILD_DISABLE_INCREMENTAL_MSBUILD", "BUILDCACHE_DISABLE_INCREMENTAL_MSBUILD")) {
         config.disable_incremental_msbuild = parse_bool(env);
     }
     
@@ -275,15 +309,15 @@ CacheConfig ConfigParser::load_config(
     if (config.cache_dir.empty()) {
         #ifdef _WIN32
         if (const char* home = std::getenv("USERPROFILE")) {
-            config.cache_dir = fs::path(home) / ".cache" / "buildcache";
+            config.cache_dir = fs::path(home) / ".cache" / "skipbuild";
         }
         #else
         if (const char* home = std::getenv("HOME")) {
-            config.cache_dir = fs::path(home) / ".cache" / "buildcache";
+            config.cache_dir = fs::path(home) / ".cache" / "skipbuild";
         }
         #endif
         if (config.cache_dir.empty()) {
-            config.cache_dir = fs::temp_directory_path() / "buildcache";
+            config.cache_dir = fs::temp_directory_path() / "skipbuild";
         }
     }
     

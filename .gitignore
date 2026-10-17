@@ -1,5 +1,7 @@
 # Build directories
 build/
+build_check/
+build_*/
 bin/
 obj/
 out/
@@ -57,3 +59,4 @@ skipbuild-test-*
 # Logs
 *.log
 *.tmp
+test_output.txt

@@ -132,7 +132,7 @@ int main(int argc, char* argv[]) {
         std::string arg1 = argv[1];
         
         if (arg1 == "--version" || arg1 == "-V") {
-            std::cout << "skipbuild 0.1.0" << std::endl;
+            std::cout << "skipbuild " << SKIPBUILD_VERSION << std::endl;
             return 0;
         }
         if (arg1 == "--help" || arg1 == "-h") {
@@ -220,7 +220,7 @@ int main(int argc, char* argv[]) {
     }
     
     if (arg1 == "--version" || arg1 == "-V") {
-        std::cout << "skipbuild 0.1.0" << std::endl;
+        std::cout << "skipbuild " << SKIPBUILD_VERSION << std::endl;
         return 0;
     }
     if (arg1 == "--help" || arg1 == "-h") {

@@ -10,6 +10,15 @@
 #include "config.hpp"
 #include "stats.hpp"
 
+// Defined by the build system from the CMake project version.
+// Fallback keeps non-CMake builds compiling without hardcoding a version.
+#ifndef SKIPBUILD_VERSION
+#define SKIPBUILD_VERSION "unknown"
+#endif
+#ifndef SKIPBUILD_WVERSION
+#define SKIPBUILD_WVERSION L"unknown"
+#endif
+
 namespace skipbuild {
 
 // Cross-platform file locking for inter-process synchronization

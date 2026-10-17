@@ -2154,7 +2154,7 @@ static std::string compute_sha256_winhttp(const std::vector<uint8_t>& data) {
 
 class WinHttpClient {
     WinHttpHandle session_;
-    std::wstring user_agent_ = L"remake/0.1.0";
+    std::wstring user_agent_ = L"remake/" SKIPBUILD_WVERSION;
     int connect_timeout_ms_ = 3000;
     int read_timeout_ms_ = 3000;
     bool verify_ssl_ = true;
@@ -2304,7 +2304,7 @@ public:
 // POSIX socket HTTP client for Linux/macOS
 class PosixHttpClient {
     int socket_fd_ = -1;
-    std::string user_agent_ = "remake/0.1.0";
+    std::string user_agent_ = "remake/" SKIPBUILD_VERSION;
     int connect_timeout_ms_ = 3000;
     int read_timeout_ms_ = 3000;
     bool verify_ssl_ = true;  // Not used for POSIX (no SSL support in raw sockets)

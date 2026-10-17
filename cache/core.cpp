@@ -1806,29 +1806,39 @@ CacheKey compute_linker_key(const LinkerCommand& cmd) {
     return key;
 }
 
-// Compute compiler hash from binary content + version string + mtime
-std::string get_compiler_hash(const std::string& compiler_path) {
-    std::filesystem::path path(compiler_path);
-    if (!std::filesystem::exists(path)) {
-        return std::to_string(std::hash<std::string>{}(compiler_path));
+// Compiler fingerprinting mode (process-wide). Initialized lazily from the
+// environment; the CLI overrides it from the loaded config.
+namespace {
+    CompilerCheckMode g_compiler_check_mode = CompilerCheckMode::Mtime;
+    std::once_flag g_compiler_check_flag;
+
+    void init_compiler_check_mode() {
+        const char* env = std::getenv("SKIPBUILD_COMPILER_CHECK");
+        if (!env) env = std::getenv("BUILDCACHE_COMPILER_CHECK");
+        if (env) g_compiler_check_mode = parse_compiler_check_mode(env);
     }
-    
-    std::ostringstream oss;
-    
-    // Hash file size and mtime
-    auto ftime = std::filesystem::last_write_time(path);
-    auto file_size = std::filesystem::file_size(path);
-    using fs_time_t = decltype(ftime.time_since_epoch().count());
-    oss << file_size << "|" << static_cast<long long>(ftime.time_since_epoch().count());
-    
-    // Get compiler version string
+}
+
+CompilerCheckMode get_compiler_check_mode() {
+    std::call_once(g_compiler_check_flag, init_compiler_check_mode);
+    return g_compiler_check_mode;
+}
+
+void set_compiler_check_mode(CompilerCheckMode mode) {
+    std::call_once(g_compiler_check_flag, init_compiler_check_mode);
+    g_compiler_check_mode = mode;
+}
+
+// Capture the first few lines of `<compiler> --version` output
+// (skips build timestamps that appear later in the output).
+static std::string get_compiler_version_output(const std::string& compiler_path) {
     std::string version_cmd;
     #ifdef _WIN32
     version_cmd = "\"" + compiler_path + "\" --version 2>&1";
     #else
     version_cmd = compiler_path + " --version 2>&1";
     #endif
-    
+
     std::array<char, 128> buffer;
     std::string version_output;
     #ifdef _WIN32
@@ -1841,18 +1851,58 @@ std::string get_compiler_hash(const std::string& compiler_path) {
             version_output += buffer.data();
         }
     }
-    
-    // Hash first few lines of version output (to avoid build timestamps)
+
     std::istringstream iss(version_output);
     std::string line;
+    std::string result;
     int line_count = 0;
     while (std::getline(iss, line) && line_count < 5) {
         if (!line.empty()) {
-            oss << "|" << line;
+            if (!result.empty()) result += "|";
+            result += line;
             line_count++;
         }
     }
-    
+    return result;
+}
+
+// Compute the compiler fingerprint based on the configured check mode:
+//   Mtime   - size + mtime + version output (default; invalidates on any change)
+//   Version - version output only (survives reinstalls/rebuilds of same version)
+//   Content - SHA-256 of the compiler binary (only real changes invalidate)
+//   None    - empty fingerprint (compiler excluded from the cache key)
+std::string get_compiler_hash(const std::string& compiler_path) {
+    CompilerCheckMode mode = get_compiler_check_mode();
+    if (mode == CompilerCheckMode::None) {
+        return "";
+    }
+
+    std::filesystem::path path(compiler_path);
+    if (!std::filesystem::exists(path)) {
+        return std::to_string(std::hash<std::string>{}(compiler_path));
+    }
+
+    if (mode == CompilerCheckMode::Content) {
+        std::string content_hash = compute_file_hash(path);
+        if (!content_hash.empty()) {
+            return compute_sha256("content|" + content_hash);
+        }
+        // Fall back to the mtime strategy if the binary could not be read
+        mode = CompilerCheckMode::Mtime;
+    }
+
+    std::ostringstream oss;
+    if (mode == CompilerCheckMode::Mtime) {
+        std::error_code ec;
+        auto file_size = std::filesystem::file_size(path, ec);
+        auto ftime = std::filesystem::last_write_time(path, ec);
+        if (!ec) {
+            oss << file_size << "|"
+                << static_cast<long long>(ftime.time_since_epoch().count());
+        }
+    }
+    oss << "|" << get_compiler_version_output(compiler_path);
+
     return compute_sha256(oss.str());
 }
 
@@ -2852,6 +2902,32 @@ namespace {
                         (std::getenv("MSBUILD") != nullptr) ||
                         (std::getenv("VisualStudioVersion") != nullptr);
     }
+
+    std::mutex g_log_file_mutex;
+
+    // Append a log line to the file named by SKIPBUILD_LOG_FILE (if set).
+    // This is the reliable way to observe skipbuild output under the Visual
+    // Studio generator / MSBuild, where a tool's stdout/stderr is swallowed
+    // on success and OutputDebugString is only captured while debugging.
+    void append_to_log_file(const std::string& line) {
+        const char* path = std::getenv("SKIPBUILD_LOG_FILE");
+        if (!path || !*path) return;
+
+        std::lock_guard<std::mutex> lock(g_log_file_mutex);
+        std::ofstream f(path, std::ios::app);
+        if (!f) return;
+
+        std::time_t t = std::time(nullptr);
+        std::tm tmv{};
+        #ifdef _WIN32
+        localtime_s(&tmv, &t);
+        #else
+        localtime_r(&t, &tmv);
+        #endif
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tmv);
+        f << buf << " " << line << "\n";
+    }
 } // namespace
 
 void init_log_level() {
@@ -2861,6 +2937,14 @@ void init_log_level() {
         if (env && (std::string(env) == "1" || std::string(env) == "true" || std::string(env) == "yes" || std::string(env) == "on")) {
             g_log_level = LogLevel::Debug;
             return;
+        }
+        // If a log file is configured but no level is set, default to Info so
+        // that SKIPBUILD_LOG_FILE alone produces useful output (e.g. VS builds).
+        if (const char* logfile = std::getenv("SKIPBUILD_LOG_FILE")) {
+            if (logfile && *logfile) {
+                g_log_level = LogLevel::Info;
+                return;
+            }
         }
         g_log_level = LogLevel::None;
         return;
@@ -2909,6 +2993,7 @@ void log_message(LogLevel level, const std::string& message) {
         std::cerr << full_msg << "\n";
         
         // Also send to Visual Studio Output window when running under VS/MSBuild
+        // (only captured by VS while a debugger is attached).
 #ifdef _WIN32
         if (is_vs_build()) {
             std::wstring wmsg(full_msg.begin(), full_msg.end());
@@ -2916,6 +3001,9 @@ void log_message(LogLevel level, const std::string& message) {
             OutputDebugStringW(wmsg.c_str());
         }
 #endif
+
+        // Reliable capture for build systems that swallow tool output (VS/MSBuild)
+        append_to_log_file(full_msg);
     }
 }
 

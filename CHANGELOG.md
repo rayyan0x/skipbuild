@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `--compiler-check` / `SKIPBUILD_COMPILER_CHECK` / `compiler_check` to control how the compiler binary is fingerprinted:
+  - `mtime` (default) — size + mtime + `--version` output
+  - `version` — `--version` output only (stable across reinstalls/rebuilds of the same version)
+  - `content` — SHA-256 of the compiler binary (stable across reinstalls, detects real changes)
+  - `none` — exclude the compiler from the cache key
+- `SKIPBUILD_LOG_FILE` to append timestamped `[skipbuild]` log lines to a file — reliable output capture under the Visual Studio generator / MSBuild, which otherwise hides tool output. Setting it alone implies `info` level.
+
+### Changed
+- Compiler fingerprinting is now configurable, so frequent compiler reinstalls/updates no longer have to invalidate the entire cache (see README "Compiler Fingerprinting & Cache Invalidation")
+
 ## [0.2.0] - 2026-10-17
 
 ### Added

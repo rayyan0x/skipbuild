@@ -281,6 +281,108 @@ void test_linker_key_normalization() {
     fs::remove_all(test_dir);
 }
 
+// Create a small fake compiler executable/script that prints a fixed version
+static fs::path make_fake_compiler(const fs::path& dir, const std::string& version) {
+#ifdef _WIN32
+    fs::path p = dir / "fake_compiler.bat";
+    std::ofstream(p, std::ios::binary) << "@echo off\r\necho FakeCompiler " << version << "\r\n";
+#else
+    fs::path p = dir / "fake_compiler.sh";
+    std::ofstream(p, std::ios::binary) << "#!/bin/sh\necho \"FakeCompiler " << version << "\"\n";
+    fs::permissions(p, fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
+                    fs::perm_options::add);
+#endif
+    return p;
+}
+
+void test_compiler_check_modes() {
+    std::cout << "Testing compiler check modes...\n";
+    using skipbuild::CompilerCheckMode;
+    auto saved = skipbuild::get_compiler_check_mode();
+    
+    fs::path test_dir = fs::temp_directory_path() / "remake-test-compiler-check";
+    if (fs::exists(test_dir)) fs::remove_all(test_dir);
+    fs::create_directories(test_dir);
+    
+    fs::path compiler = make_fake_compiler(test_dir, "1.0.0");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    
+    // none: empty fingerprint (compiler excluded from the key)
+    skipbuild::set_compiler_check_mode(CompilerCheckMode::None);
+    assert(skipbuild::get_compiler_hash(compiler.string()).empty());
+    std::cout << "  PASS: 'none' yields empty fingerprint\n";
+    
+    // content: stable across mtime changes, changes when content changes
+    skipbuild::set_compiler_check_mode(CompilerCheckMode::Content);
+    std::string content1 = skipbuild::get_compiler_hash(compiler.string());
+    assert(content1.size() == 64);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    make_fake_compiler(test_dir, "1.0.0");  // same bytes, new mtime
+    std::string content2 = skipbuild::get_compiler_hash(compiler.string());
+    assert(content1 == content2);
+    make_fake_compiler(test_dir, "2.0.0");  // different bytes
+    std::string content3 = skipbuild::get_compiler_hash(compiler.string());
+    assert(content1 != content3);
+    std::cout << "  PASS: 'content' stable across mtime, changes on content\n";
+    
+    // version: stable across mtime changes (same version output)
+    make_fake_compiler(test_dir, "1.0.0");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    skipbuild::set_compiler_check_mode(CompilerCheckMode::Version);
+    std::string ver1 = skipbuild::get_compiler_hash(compiler.string());
+    assert(ver1.size() == 64);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    make_fake_compiler(test_dir, "1.0.0");  // same bytes + version, new mtime
+    std::string ver2 = skipbuild::get_compiler_hash(compiler.string());
+    assert(ver1 == ver2);
+    std::cout << "  PASS: 'version' stable across mtime changes\n";
+    
+    // mtime: changes when mtime changes
+    skipbuild::set_compiler_check_mode(CompilerCheckMode::Mtime);
+    std::string mtime1 = skipbuild::get_compiler_hash(compiler.string());
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    make_fake_compiler(test_dir, "1.0.0");  // same bytes, new mtime
+    std::string mtime2 = skipbuild::get_compiler_hash(compiler.string());
+    assert(mtime1 != mtime2);
+    std::cout << "  PASS: 'mtime' changes when mtime changes\n";
+    
+    skipbuild::set_compiler_check_mode(saved);
+    fs::remove_all(test_dir);
+}
+
+void test_log_file_output() {
+    std::cout << "Testing SKIPBUILD_LOG_FILE capture...\n";
+    fs::path log_path = fs::temp_directory_path() / "remake-test-logfile.log";
+    if (fs::exists(log_path)) fs::remove(log_path);
+    
+#ifdef _WIN32
+    _putenv_s("REMAKE_LOG", "debug");
+    _putenv_s("SKIPBUILD_LOG_FILE", log_path.string().c_str());
+#else
+    setenv("REMAKE_LOG", "debug", 1);
+    setenv("SKIPBUILD_LOG_FILE", log_path.string().c_str(), 1);
+#endif
+    
+    skipbuild::log_debug("hello-from-skipbuild-test");
+    
+    {
+        std::ifstream f(log_path);
+        std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        assert(content.find("hello-from-skipbuild-test") != std::string::npos);
+    }
+    std::cout << "  PASS: log line written to SKIPBUILD_LOG_FILE\n";
+    
+#ifdef _WIN32
+    _putenv_s("REMAKE_LOG", "");
+    _putenv_s("SKIPBUILD_LOG_FILE", "");
+#else
+    unsetenv("REMAKE_LOG");
+    unsetenv("SKIPBUILD_LOG_FILE");
+#endif
+    std::error_code ec;
+    fs::remove(log_path, ec);
+}
+
 void test_compiler_hash_changes_on_binary_change(const fs::path& self_exe) {
     std::cout << "Testing compiler hash changes on binary change...\n";
     
@@ -328,6 +430,17 @@ void test_compiler_hash_changes_on_binary_change(const fs::path& self_exe) {
 }
 
 int main(int argc, char* argv[]) {
+    // When this binary is invoked as a fake compiler (see
+    // test_compiler_hash_changes_on_binary_change), answer --version and exit
+    // instead of recursively running the whole test suite.
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--version" || a == "-v") {
+            std::cout << "fake-compiler 1.0.0\n";
+            return 0;
+        }
+    }
+
     fs::path self_exe = fs::canonical(argv[0]);
     std::cout << "=== Cache Key Determinism & Invalidation Tests ===\n\n";
     
@@ -350,6 +463,12 @@ int main(int argc, char* argv[]) {
     std::cout << "\n";
     
     test_linker_key_normalization();
+    std::cout << "\n";
+    
+    test_compiler_check_modes();
+    std::cout << "\n";
+    
+    test_log_file_output();
     std::cout << "\n";
     
     std::cout << "=== All tests passed! ===\n";

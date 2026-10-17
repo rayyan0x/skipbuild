@@ -177,7 +177,14 @@ main.o: main.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 ```
 
-> **Note:** VS generator sets launcher but shows no `[skipbuild]` output in logs.
+> **Visual Studio generator & build output:** With the VS generator, MSBuild runs the compiler through the launcher but does **not** show a successful tool's stdout/stderr at normal verbosity, so `[skipbuild]` lines don't appear in the build log. To see them:
+> - **Recommended:** set `SKIPBUILD_LOG_FILE` — skipbuild appends each log line (with a timestamp) to that file, which works in every build system:
+>   ```powershell
+>   $env:SKIPBUILD_LOG_FILE = "$env:TEMP\skipbuild.log"   # then: Get-Content $env:TEMP\skipbuild.log -Wait
+>   ```
+> - Or raise **Tools → Options → Projects and Solutions → Build and Run → MSBuild project build output verbosity** to *Detailed* (combine with `REMAKE_LOG=debug`).
+> - Or build from a **Developer Command Prompt** / `cmake --build`, where the output is visible on stderr.
+> - `OutputDebugString` is also emitted under VS, but Visual Studio only shows it in the **Output → Debug** pane **while a debugger is attached**.
 
 ### B. Isolated / Target-Specific Configuration
 
@@ -208,9 +215,35 @@ The cache key is a SHA-256 over:
 1. **Source file content** — full text of `.cpp`/`.c`/`.cc`
 2. **Normalized include paths** — `-I`/`/I` resolved to build root, forward slashes, case-folded on Windows
 3. **Sorted compiler flags** — all flags except output/file args, sorted for determinism
-4. **Compiler binary hash** — SHA-256 of `cl.exe`, `g++`, `clang++`
+4. **Compiler fingerprint** — see [Compiler Fingerprinting](#compiler-fingerprinting--cache-invalidation) below
 5. **Compiler type + version** — e.g., `MSVC 19.51.36260`, `GCC 13.3`
 6. **Relevant environment** — `SKIPBUILD_*`
+
+### 🔏 Compiler Fingerprinting & Cache Invalidation
+
+skipbuild fingerprints the compiler binary and mixes it into every cache key. This is what makes the cache **safe**: if the compiler changes, old entries are not reused. The trade-off is that a compiler change invalidates every entry that used the previous compiler.
+
+Control this with `--compiler-check`, `SKIPBUILD_COMPILER_CHECK`, or the `compiler_check` config key:
+
+| Mode | Fingerprint | Invalidates when… | Use when |
+|---|---|---|---|
+| `mtime` *(default)* | file size + mtime + `--version` output | the binary changes **or** its timestamp changes (e.g. reinstall, `touch`, package-manager reinstall) | you want maximum safety and rarely touch the compiler |
+| `version` | `--version` output only | the reported version string changes | you frequently rebuild/reinstall the **same** compiler version |
+| `content` | SHA-256 of the binary contents | the binary contents actually change | you want accuracy across reinstalls **and** detection of real updates (slower first hash) |
+| `none` | *(none)* | never | you accept the risk of reusing objects across compiler changes (CI images you fully control) |
+
+> **Why does a compiler update clear my whole cache?**
+> Every cache key includes the compiler fingerprint. When the fingerprint changes, no existing key matches, so the next build is a full miss that repopulates the cache. This is intentional — reusing objects compiled by a different compiler can produce subtly wrong binaries.
+>
+> **Mitigations:**
+> - Reinstalling the *same* compiler (common with `apt`, `choco`, or CI images) only changes the file's mtime. Set `SKIPBUILD_COMPILER_CHECK=content` so an identical binary keeps producing the **same** fingerprint — no invalidation.
+> - If you rebuild the same compiler version yourself, `version` mode is stable across rebuilds.
+> - On throwaway CI runners with a shared remote cache, pin the compiler and use `content` so the remote cache stays valid across runner images.
+
+```bash
+# Stable across reinstalls of the same compiler, still detects real updates
+export SKIPBUILD_COMPILER_CHECK=content
+```
 
 ### Hit / Miss / Store Flow
 
@@ -281,6 +314,7 @@ compile command
 | Remote max retries | — | `SKIPBUILD_REMOTE_MAX_RETRIES` | `remote_max_retries` | `1` |
 | Remote auth header | — | `SKIPBUILD_REMOTE_AUTH_HEADER` | `remote_auth_header` | — |
 | Remote verify SSL | — | `SKIPBUILD_REMOTE_VERIFY_SSL` | `remote_verify_ssl` | `true` |
+| Compiler fingerprint | `--compiler-check <mode>` | `SKIPBUILD_COMPILER_CHECK` | `compiler_check` | `mtime` |
 | Disable cache | — | `SKIPBUILD_DISABLE=1` | — | `false` |
 | Log level | — | `REMAKE_LOG=debug\|info\|warn\|error\|none` | — | `none` |
 
@@ -288,10 +322,10 @@ compile command
 
 **Config file locations (priority order):**
 1. `SKIPBUILD_CONFIG` env var (or legacy `BUILDCACHE_CONFIG`)
-2. `.buildcache.conf` (project root)
-3. `.buildcache/config` (project root)
-4. Windows: `%APPDATA%\buildcache\config` / `%USERPROFILE%\.buildcache\config`
-5. Unix: `~/.config/buildcache/config` / `~/.buildcache/config`
+2. `.skipbuild.conf` (project root; legacy `.buildcache.conf` also read)
+3. `.skipbuild/config` (project root; legacy `.buildcache/config` also read)
+4. Windows: `%APPDATA%\skipbuild\config` / `%USERPROFILE%\.skipbuild\config`
+5. Unix: `~/.config/skipbuild/config` / `~/.skipbuild/config`
 
 ---
 
@@ -313,6 +347,7 @@ Options:
   --max-age <days>          Max age in days
   --compression <bool>      Enable/disable compression
   --read-only <bool>        Read-only cache
+  --compiler-check <mode>   Compiler fingerprint: mtime, version, content, none
 ```
 
 ---
@@ -488,7 +523,8 @@ $env:REMAKE_LOG = "debug"
 |---|---|---|
 | Cache always misses | Compiler not in PATH, different path each run | Use full path; ensure same compiler binary |
 | Wrong compiler detected | Called without `--` separator | Use `skipbuild -- cl.exe ...` |
-| Stale objects after compiler upgrade | Compiler hash not captured | Upgrade invalidates automatically via binary hash |
+| Stale objects after compiler upgrade | Compiler fingerprint not captured | Upgrades invalidate automatically via the compiler fingerprint |
+| Whole cache misses after a compiler update/reinstall | Every key includes the compiler fingerprint | Expected for real updates. For reinstalls of an identical binary set `SKIPBUILD_COMPILER_CHECK=content` to keep keys stable. See [Compiler Fingerprinting](#compiler-fingerprinting--cache-invalidation) |
 | Permission errors on cache | Cache dir not writable | Set `SKIPBUILD_DIR` to writable path; check `--clean` |
 | MSVC PDB not restored | `/Zi` but PDB path not tracked | Ensure `/Fo` specifies output; PDB inferred from `.obj` |
 | `--cache-dir` doesn't work | It prints, doesn't set | Use `SKIPBUILD_DIR` env or config file |
@@ -501,10 +537,11 @@ $env:REMAKE_LOG = "debug"
 | Remote cache (HTTP/S3) | Built-in, tested with S3 mock; auth via headers only |
 | GCC/Clang PCH (`-x c++-header`) | ✅ Implemented — flag parsing, key invalidation, dual-output caching |
 | MSVC `/Yc`/`/Yu` PCH | ✅ Implemented — flag parsing, key invalidation, dual-output caching |
-| Windows/Linux ARM64 | Not tested — code is portable, no CI coverage |
+| Windows/Linux ARM64 | ✅ CI (Ubuntu ARM64, macOS Apple Silicon, Windows ARM64) |
 | FreeBSD / other BSDs | Not tested — POSIX paths should work, no CI |
 | Distributed builds (distcc/icecream) | Not tested |
-| VS generator logging | `[skipbuild]` output goes to stderr, not the MSBuild console log. Set `REMAKE_LOG=debug` and view the **Output → Debug** window in VS (uses `OutputDebugString`). |
+| Compiler update invalidates cache | Expected for safety — configurable via `compiler_check`; see [Compiler Fingerprinting](#compiler-fingerprinting--cache-invalidation) |
+| VS generator logging | MSBuild hides a successful tool's stdout/stderr, so `[skipbuild]` lines don't show in the build log. Set `SKIPBUILD_LOG_FILE=<path>` (works everywhere), or raise MSBuild verbosity to *Detailed*, or build from a Developer Command Prompt. `OutputDebugString` only appears while a debugger is attached. |
 
 ---
 
@@ -520,6 +557,6 @@ $env:REMAKE_LOG = "debug"
 ```bash
 ctest --test-dir build -C Release --output-on-failure --timeout 120
 ```
-All 11 tests pass on Windows, Linux, macOS (CI verified).
+All 12 tests pass on Windows, Linux, macOS (CI verified).
 
 **License:** MIT — see [LICENSE](LICENSE)

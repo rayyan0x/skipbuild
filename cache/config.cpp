@@ -8,6 +8,35 @@
 namespace fs = std::filesystem;
 namespace skipbuild {
 
+CompilerCheckMode parse_compiler_check_mode(const std::string& value) {
+    std::string v = value;
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (v == "mtime" || v == "default" || v == "time") {
+        return CompilerCheckMode::Mtime;
+    }
+    if (v == "version" || v == "ver") {
+        return CompilerCheckMode::Version;
+    }
+    if (v == "content" || v == "hash" || v == "binary") {
+        return CompilerCheckMode::Content;
+    }
+    if (v == "none" || v == "off" || v == "disabled") {
+        return CompilerCheckMode::None;
+    }
+    return CompilerCheckMode::Mtime;  // Unknown values fall back to the default
+}
+
+const char* compiler_check_mode_to_string(CompilerCheckMode mode) {
+    switch (mode) {
+        case CompilerCheckMode::Mtime:   return "mtime";
+        case CompilerCheckMode::Version: return "version";
+        case CompilerCheckMode::Content: return "content";
+        case CompilerCheckMode::None:    return "none";
+    }
+    return "mtime";
+}
+
 std::string ConfigParser::trim(const std::string& s) {
     size_t start = 0;
     while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) {
@@ -137,6 +166,8 @@ void ConfigParser::apply_values(CacheConfig& config, const std::map<std::string,
             } catch (...) {}
         } else if (lower_key == "disable_incremental_msbuild" || lower_key == "disable_incremental") {
             config.disable_incremental_msbuild = parse_bool(value);
+        } else if (lower_key == "compiler_check" || lower_key == "compiler_hash") {
+            config.compiler_check = parse_compiler_check_mode(value);
         }
         // Unknown keys are silently ignored
     }
@@ -289,6 +320,10 @@ CacheConfig ConfigParser::load_config(
     
     if (const char* env = get_env("SKIPBUILD_DISABLE_INCREMENTAL_MSBUILD", "BUILDCACHE_DISABLE_INCREMENTAL_MSBUILD")) {
         config.disable_incremental_msbuild = parse_bool(env);
+    }
+    
+    if (const char* env = get_env("SKIPBUILD_COMPILER_CHECK", "BUILDCACHE_COMPILER_CHECK")) {
+        config.compiler_check = parse_compiler_check_mode(env);
     }
     
     // 5. Apply CLI overrides (highest priority)

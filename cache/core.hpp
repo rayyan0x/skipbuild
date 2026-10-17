@@ -268,6 +268,12 @@ CompilerInfo detect_compiler(const std::string& compiler_path);
 std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]);
 std::string get_compiler_hash(const std::string& compiler_path);
 std::string get_compiler_hash_with_version(const std::string& compiler_path);
+
+// Compiler fingerprinting strategy used by get_compiler_hash().
+// Defaults from SKIPBUILD_COMPILER_CHECK (or legacy BUILDCACHE_COMPILER_CHECK);
+// the CLI overrides it from the loaded config via set_compiler_check_mode().
+CompilerCheckMode get_compiler_check_mode();
+void set_compiler_check_mode(CompilerCheckMode mode);
 std::vector<std::string> get_dependencies(char** argv, int argc);
 std::vector<std::string> canonicalize_flags(const std::vector<std::string>& flags, CompilerType type);
 

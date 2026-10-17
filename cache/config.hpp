@@ -6,6 +6,18 @@
 
 namespace skipbuild {
 
+// How the compiler binary is fingerprinted when building cache keys.
+// A compiler change invalidates cache entries that used the old compiler.
+enum class CompilerCheckMode {
+    Mtime,    // size + mtime + version output (default: fast, maximally safe)
+    Version,  // version output only (stable across reinstalls/rebuilds of the same version)
+    Content,  // SHA-256 of the compiler binary content (accurate, slower)
+    None      // exclude the compiler from the cache key (fastest, least safe)
+};
+
+CompilerCheckMode parse_compiler_check_mode(const std::string& value);
+const char* compiler_check_mode_to_string(CompilerCheckMode mode);
+
 struct CacheConfig {
     int64_t max_cache_size_bytes = 5LL * 1024 * 1024 * 1024;  // 5 GB default
     int max_age_days = 30;
@@ -18,6 +30,7 @@ struct CacheConfig {
     int remote_read_timeout_ms = 3000;
     int remote_max_retries = 1;
     bool disable_incremental_msbuild = true;  // Auto-disable for MSBuild incremental (output newer than source)
+    CompilerCheckMode compiler_check = CompilerCheckMode::Mtime;  // Compiler fingerprinting strategy
 };
 
 class ConfigParser {

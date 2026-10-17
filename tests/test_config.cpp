@@ -207,6 +207,33 @@ void test_precedence_hierarchy() {
     fs::remove_all(test_dir);
 }
 
+void test_compiler_check_mode() {
+    std::cout << "Testing compiler check mode config...\n";
+    using skipbuild::CompilerCheckMode;
+    
+    assert(skipbuild::parse_compiler_check_mode("mtime") == CompilerCheckMode::Mtime);
+    assert(skipbuild::parse_compiler_check_mode("MTIME") == CompilerCheckMode::Mtime);
+    assert(skipbuild::parse_compiler_check_mode("default") == CompilerCheckMode::Mtime);
+    assert(skipbuild::parse_compiler_check_mode("version") == CompilerCheckMode::Version);
+    assert(skipbuild::parse_compiler_check_mode("content") == CompilerCheckMode::Content);
+    assert(skipbuild::parse_compiler_check_mode("none") == CompilerCheckMode::None);
+    assert(skipbuild::parse_compiler_check_mode("off") == CompilerCheckMode::None);
+    assert(skipbuild::parse_compiler_check_mode("nonsense") == CompilerCheckMode::Mtime);
+    
+    assert(std::string(skipbuild::compiler_check_mode_to_string(CompilerCheckMode::Mtime)) == "mtime");
+    assert(std::string(skipbuild::compiler_check_mode_to_string(CompilerCheckMode::Version)) == "version");
+    assert(std::string(skipbuild::compiler_check_mode_to_string(CompilerCheckMode::Content)) == "content");
+    assert(std::string(skipbuild::compiler_check_mode_to_string(CompilerCheckMode::None)) == "none");
+    
+    skipbuild::CacheConfig config;
+    assert(config.compiler_check == CompilerCheckMode::Mtime);  // default
+    std::map<std::string, std::string> values = {{"compiler_check", "content"}};
+    skipbuild::ConfigParser::apply_values(config, values);
+    assert(config.compiler_check == CompilerCheckMode::Content);
+    
+    std::cout << "  PASS: compiler_check parsed and applied correctly\n";
+}
+
 void test_malformed_config() {
     std::cout << "Testing malformed config handling...\n";
     
@@ -330,6 +357,9 @@ int main() {
     std::cout << "\n";
     
     test_precedence_hierarchy();
+    std::cout << "\n";
+    
+    test_compiler_check_mode();
     std::cout << "\n";
     
     test_malformed_config();

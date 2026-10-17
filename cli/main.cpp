@@ -54,6 +54,7 @@ void print_usage(const char* prog) {
     std::cerr << "  --remote-read-only              Remote cache read-only mode\n";
     std::cerr << "  --remote-timeout <ms>           Remote connect/read timeout in ms\n";
     std::cerr << "  --disable-incremental-msbuild   Auto-disable for MSBuild incremental (true/false, default: true)\n";
+    std::cerr << "  --compiler-check <mode>         Compiler fingerprint: mtime, version, content, none (default: mtime)\n";
     std::cerr << "\n";
     std::cerr << "Environment:\n";
     std::cerr << "  SKIPBUILD_DIR (or BUILDCACHE_DIR)                  Cache directory\n";
@@ -69,17 +70,20 @@ void print_usage(const char* prog) {
     std::cerr << "  SKIPBUILD_REMOTE_AUTH_HEADER (or BUILDCACHE_REMOTE_AUTH_HEADER)  Remote auth header\n";
     std::cerr << "  SKIPBUILD_REMOTE_VERIFY_SSL (or BUILDCACHE_REMOTE_VERIFY_SSL)  Remote verify SSL (true/false)\n";
     std::cerr << "  SKIPBUILD_DISABLE_INCREMENTAL_MSBUILD (or BUILDCACHE_DISABLE_INCREMENTAL_MSBUILD)  Auto-disable for MSBuild incremental (true/false)\n";
+    std::cerr << "  SKIPBUILD_COMPILER_CHECK (or BUILDCACHE_COMPILER_CHECK)  Compiler fingerprint: mtime, version, content, none (default: mtime)\n";
     std::cerr << "  SKIPBUILD_DISABLE=1             Disable cache (passthrough)\n";
     std::cerr << "  SKIPBUILD_DEBUG=1               Debug logging (legacy)\n";
     std::cerr << "  REMAKE_LOG=<level>              Log level: debug, info, warn, error, none (default: none)\n";
+    std::cerr << "  SKIPBUILD_LOG_FILE=<path>       Append [skipbuild] logs to a file (useful under VS/MSBuild; implies info level)\n";
     std::cerr << "\n";
-    std::cerr << "Config file (.buildcache.conf):\n";
+    std::cerr << "Config file (.skipbuild.conf):\n";
     std::cerr << "  max_cache_size = 10G\n";
     std::cerr << "  cache_dir = /path/to/cache\n";
     std::cerr << "  compression_enabled = true\n";
     std::cerr << "  read_only = false\n";
     std::cerr << "  remote_url = http://...\n";
     std::cerr << "  disable_incremental_msbuild = true\n";
+    std::cerr << "  compiler_check = mtime\n";
 }
 
 skipbuild::CacheConfig load_cache_config(const fs::path& project_root = "") {
@@ -144,6 +148,8 @@ int main(int argc, char* argv[]) {
     // Parse CLI args for config overrides before processing commands
     std::optional<skipbuild::CacheConfig> cli_overrides;
     fs::path cli_cache_dir;
+    bool cli_compiler_check_set = false;
+    skipbuild::CompilerCheckMode cli_compiler_check = skipbuild::CompilerCheckMode::Mtime;
     std::vector<bool> arg_consumed(argc, false);  // Track consumed arguments
     
     for (int i = 1; i < argc; ++i) {
@@ -193,6 +199,11 @@ int main(int argc, char* argv[]) {
             cli_overrides->disable_incremental_msbuild = skipbuild::ConfigParser::parse_bool(argv[++i]);
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
+        } else if (arg == "--compiler-check" && i + 1 < argc) {
+            cli_compiler_check = skipbuild::parse_compiler_check_mode(argv[++i]);
+            cli_compiler_check_set = true;
+            arg_consumed[i] = true;
+            arg_consumed[i-1] = true;
         }
     }
     
@@ -201,6 +212,11 @@ int main(int argc, char* argv[]) {
     if (!cli_cache_dir.empty()) {
         config.cache_dir = cli_cache_dir;
     }
+    if (cli_compiler_check_set) {
+        config.compiler_check = cli_compiler_check;
+    }
+    // Apply the resolved compiler fingerprint strategy process-wide
+    skipbuild::set_compiler_check_mode(config.compiler_check);
     
     // Build filtered argv (exclude consumed CLI options)
     std::vector<char*> filtered_argv;

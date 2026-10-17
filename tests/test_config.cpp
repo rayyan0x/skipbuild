@@ -155,13 +155,13 @@ void test_precedence_hierarchy() {
     fs::path project_config = project_dir / ".buildcache.conf";
     std::ofstream(project_config) << "max_cache_size = 2G\n";
     
-    // Set environment variable
+    // Set environment variable (use new SKIPBUILD_* prefix, still supports legacy BUILDCACHE_*)
     #ifdef _WIN32
-    _putenv_s("BUILDCACHE_MAX_SIZE", "3G");
-    _putenv_s("BUILDCACHE_CACHE_DIR", "/env/cache");
+    _putenv_s("SKIPBUILD_MAX_SIZE", "3G");
+    _putenv_s("SKIPBUILD_CACHE_DIR", "/env/cache");
     #else
-    setenv("BUILDCACHE_MAX_SIZE", "3G", 1);
-    setenv("BUILDCACHE_CACHE_DIR", "/env/cache", 1);
+    setenv("SKIPBUILD_MAX_SIZE", "3G", 1);
+    setenv("SKIPBUILD_CACHE_DIR", "/env/cache", 1);
     #endif
     
     // Test: defaults < global < project < env < cli
@@ -184,11 +184,11 @@ void test_precedence_hierarchy() {
     
     // Clean up env vars
     #ifdef _WIN32
-    _putenv_s("BUILDCACHE_MAX_SIZE", "");
-    _putenv_s("BUILDCACHE_CACHE_DIR", "");
+    _putenv_s("SKIPBUILD_MAX_SIZE", "");
+    _putenv_s("SKIPBUILD_CACHE_DIR", "");
     #else
-    unsetenv("BUILDCACHE_MAX_SIZE");
-    unsetenv("BUILDCACHE_CACHE_DIR");
+    unsetenv("SKIPBUILD_MAX_SIZE");
+    unsetenv("SKIPBUILD_CACHE_DIR");
     #endif
     
     // Test: project overrides global

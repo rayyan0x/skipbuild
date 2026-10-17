@@ -2788,33 +2788,38 @@ RemoteCache::RemoteStats RemoteCache::get_stats() const {
 RemoteCache::Config RemoteCache::from_env() {
     Config config;
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_URL")) {
+    auto get_env = [](const char* skipbuild_var, const char* buildcache_var) -> const char* {
+        if (const char* v = std::getenv(skipbuild_var)) return v;
+        return std::getenv(buildcache_var);
+    };
+    
+    if (const char* env = get_env("SKIPBUILD_REMOTE_URL", "BUILDCACHE_REMOTE_URL")) {
         config.url = env;
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_READ_ONLY")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_READ_ONLY", "BUILDCACHE_REMOTE_READ_ONLY")) {
         std::string v = env;
         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
         config.read_only = (v == "1" || v == "true" || v == "yes" || v == "on");
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_CONNECT_TIMEOUT")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_CONNECT_TIMEOUT", "BUILDCACHE_REMOTE_CONNECT_TIMEOUT")) {
         try { config.connect_timeout_ms = std::stoi(env); } catch (...) {}
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_READ_TIMEOUT")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_READ_TIMEOUT", "BUILDCACHE_REMOTE_READ_TIMEOUT")) {
         try { config.read_timeout_ms = std::stoi(env); } catch (...) {}
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_MAX_RETRIES")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_MAX_RETRIES", "BUILDCACHE_REMOTE_MAX_RETRIES")) {
         try { config.max_retries = std::stoi(env); } catch (...) {}
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_AUTH_HEADER")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_AUTH_HEADER", "BUILDCACHE_REMOTE_AUTH_HEADER")) {
         config.auth_header = env;
     }
     
-    if (const char* env = std::getenv("BUILDCACHE_REMOTE_VERIFY_SSL")) {
+    if (const char* env = get_env("SKIPBUILD_REMOTE_VERIFY_SSL", "BUILDCACHE_REMOTE_VERIFY_SSL")) {
         std::string v = env;
         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
         config.verify_ssl = (v == "1" || v == "true" || v == "yes" || v == "on");

@@ -21,6 +21,15 @@ case "$OS" in
     *) echo "Unsupported OS: $OS" >&2; exit 1 ;;
 esac
 
+# Portable SHA-256 tool (coreutils on Linux, shasum on macOS)
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA256="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+    SHA256="shasum -a 256"
+else
+    SHA256=""
+fi
+
 # Resolve version
 if [ "$VERSION" = "latest" ]; then
     VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
@@ -45,9 +54,9 @@ curl -fsSL "$URL" -o "$TMP"
 chmod +x "$TMP"
 
 # Verify checksum if available
-if curl -fsSL "$SUMS_URL" -o "$TMP.sha256" 2>/dev/null; then
+if [ -n "$SHA256" ] && curl -fsSL "$SUMS_URL" -o "$TMP.sha256" 2>/dev/null; then
     EXPECTED=$(grep "$ASSET" "$TMP.sha256" | awk '{print $1}')
-    ACTUAL=$(sha256sum "$TMP" | awk '{print $1}')
+    ACTUAL=$($SHA256 "$TMP" | awk '{print $1}')
     if [ "$EXPECTED" != "$ACTUAL" ]; then
         echo "Checksum mismatch!" >&2
         exit 1

@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/ins
 irm https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.ps1 | iex
 ```
 
-> **Note:** Pre-built binaries from GitHub Releases. Scripts verify checksums and add to PATH.
+> **Note:** Installs a pre-built binary from GitHub Releases. Both scripts verify the SHA-256 checksum; the Windows script also adds the install directory to your user `PATH`.
 
 **From source build:**
 ```bash
@@ -177,14 +177,13 @@ main.o: main.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 ```
 
-> **Visual Studio generator & build output:** With the VS generator, MSBuild runs the compiler through the launcher but does **not** show a successful tool's stdout/stderr at normal verbosity, so `[skipbuild]` lines don't appear in the build log. To see them:
-> - **Recommended:** set `SKIPBUILD_LOG_FILE` — skipbuild appends each log line (with a timestamp) to that file, which works in every build system:
->   ```powershell
->   $env:SKIPBUILD_LOG_FILE = "$env:TEMP\skipbuild.log"   # then: Get-Content $env:TEMP\skipbuild.log -Wait
->   ```
-> - Or raise **Tools → Options → Projects and Solutions → Build and Run → MSBuild project build output verbosity** to *Detailed* (combine with `REMAKE_LOG=debug`).
-> - Or build from a **Developer Command Prompt** / `cmake --build`, where the output is visible on stderr.
-> - `OutputDebugString` is also emitted under VS, but Visual Studio only shows it in the **Output → Debug** pane **while a debugger is attached**.
+> **CMake generators:** `CMAKE_<LANG>_COMPILER_LAUNCHER` is honored only by the **Ninja** and **Makefile** generators (including NMake). The **Visual Studio** generator ignores it — *skipbuild* is never invoked and no cache entries are created. Use Ninja/Make for automatic caching, or wrap the compiler manually (see below).
+>
+> **Seeing `[skipbuild]` output under MSBuild/VS:** MSBuild hides a successful tool's stdout/stderr at normal verbosity, so even when the launcher does run, the `[skipbuild]` lines won't appear in the build log. Set `SKIPBUILD_LOG_FILE` to append timestamped log lines to a file — this works in every build system:
+> ```powershell
+> $env:SKIPBUILD_LOG_FILE = "$env:TEMP\skipbuild.log"   # then: Get-Content $env:TEMP\skipbuild.log -Wait
+> ```
+> Alternatively raise **Tools → Options → Projects and Solutions → Build and Run → MSBuild project build output verbosity** to *Detailed* (combine with `REMAKE_LOG=debug`). `OutputDebugString` is also emitted under VS, but Visual Studio only shows it in the **Output → Debug** pane **while a debugger is attached**.
 
 ### B. Isolated / Target-Specific Configuration
 
@@ -317,6 +316,7 @@ compile command
 | Compiler fingerprint | `--compiler-check <mode>` | `SKIPBUILD_COMPILER_CHECK` | `compiler_check` | `mtime` |
 | Disable cache | — | `SKIPBUILD_DISABLE=1` | — | `false` |
 | Log level | — | `REMAKE_LOG=debug\|info\|warn\|error\|none` | — | `none` |
+| Log file | — | `SKIPBUILD_LOG_FILE` | — | — |
 
 > **Note:** The legacy `BUILDCACHE_*` prefix is still accepted as a fallback, but `SKIPBUILD_*` is preferred. `SKIPBUILD_DEBUG=1` is supported as a shortcut for `REMAKE_LOG=debug`.
 
@@ -335,19 +335,24 @@ compile command
 skipbuild - C++ build cache (compiler launcher)
 
 Modes:
-  skipbuild g++ -c foo.cpp -o foo.o     # Wrap compiler
-  skipbuild --cache-dir <path>          # Print cache directory (does not set)
+  skipbuild g++ -c foo.cpp -o foo.o     # Wrap compiler ("--" is optional)
+  skipbuild --cache-dir <path>          # Override cache directory for this run
   skipbuild --stats                     # Show cache statistics
+  skipbuild --remote-stats              # Show remote cache statistics
   skipbuild --clear-stats               # Reset statistics to zero
   skipbuild --clean                     # Remove all cache entries
   skipbuild --version                   # Show version
 
 Options:
-  --max-cache-size <size>   Max cache size (10G, 500M)
-  --max-age <days>          Max age in days
-  --compression <bool>      Enable/disable compression
-  --read-only <bool>        Read-only cache
-  --compiler-check <mode>   Compiler fingerprint: mtime, version, content, none
+  --max-cache-size <size>              Max cache size (10G, 500M)
+  --max-age <days>                     Max age in days
+  --compression <bool>                 Enable/disable compression
+  --read-only <bool>                   Read-only cache
+  --compiler-check <mode>              Compiler fingerprint: mtime, version, content, none
+  --remote-url <url>                   Remote cache endpoint (e.g. http://cache:8080)
+  --remote-read-only <bool>            Remote cache read-only mode
+  --remote-timeout <ms>                Remote connect/read timeout in ms
+  --disable-incremental-msbuild <bool> Bypass cache when MSBuild output is newer (default: true)
 ```
 
 ---
@@ -360,7 +365,7 @@ Options:
 | `--clear-stats` | Resets statistics to zero |
 | `--clean` | Removes all cache entries (`rm -rf ~/.cache/skipbuild`) |
 
-**Cache directory:** `~/.cache/skipbuild` (Windows: `%LOCALAPPDATA%\skipbuild`)  
+**Cache directory:** `~/.cache/skipbuild` (Windows: `%USERPROFILE%\.cache\skipbuild`)  
 **Size limit:** 5 GB default, 85% target, LRU + max-age (30 days) eviction
 
 ---
@@ -458,20 +463,23 @@ $env:SKIPBUILD_REMOTE_READ_TIMEOUT = "2000"
 ```powershell
 # First run - Cache MISS, compiles and uploads
 skipbuild -- cl.exe /c hello.cpp /Fohello.obj
-# [skipbuild] MISS <hash> -> compiling...
-# [CACHE UPLOAD] Saved: /test-bucket/<hash>.zst
+# [skipbuild] MISS <key> -> compiling...
+# [CACHE UPLOAD] Saved: /test-bucket/<compiler>/<aa>/<bb>/<key>/<key>.zst
 
-# Second run - Cache HIT, downloads from mock server
+# Second run - Cache HIT, downloads from mock server (clear the local cache first)
 skipbuild -- cl.exe /c hello.cpp /Fohello.obj
-# [skipbuild] HIT <hash>
-# [CACHE HIT] Served: /test-bucket/<hash>.zst
+# [skipbuild] HIT <key>
+# [CACHE HIT] Served: /test-bucket/<compiler>/<aa>/<bb>/<key>/<key>.zst
 ```
 
 ### 4. Verify in Mock Server Logs
+Remote objects are namespaced by compiler fingerprint and sharded by the key:
+`/test-bucket/<compiler>/<aa>/<bb>/<key>/<key>.zst` (plus `meta.json` and any sidecars).
+
 ```
-[CACHE MISS] Not found: /test-bucket/48476142e635...
-[CACHE UPLOAD] Saved: /test-bucket/48476142e635...
-[CACHE HIT] Served: /test-bucket/48476142e635...
+[CACHE MISS] Not found: /test-bucket/1a603bd8/26/13/26132f1da31f.../meta.json
+[CACHE UPLOAD] Saved: /test-bucket/1a603bd8/26/13/26132f1da31f.../26132f1da31f....zst
+[CACHE HIT] Served: /test-bucket/1a603bd8/26/13/26132f1da31f.../meta.json
 ```
 
 This confirms the full remote cache round-trip works: miss → compile → upload → hit → download.
@@ -493,7 +501,7 @@ $env:SKIPBUILD_COMPRESSION = "true"
 $env:REMAKE_LOG = "debug"
 
 # Run a test compilation (example using MSVC)
-.\skipbuild.exe cl /c hello.cpp /Fohello.obj
+.\skipbuild.exe -- cl /c hello.cpp /Fohello.obj
 ```
 
 **First Run:** Triggers a Cache Miss, compiles the file, and uploads the compressed `.zst` artifact and `meta.json` to the mock server (`[CACHE UPLOAD]`).
@@ -522,12 +530,12 @@ $env:REMAKE_LOG = "debug"
 | Symptom | Cause | Fix |
 |---|---|---|
 | Cache always misses | Compiler not in PATH, different path each run | Use full path; ensure same compiler binary |
-| Wrong compiler detected | Called without `--` separator | Use `skipbuild -- cl.exe ...` |
+| Compiler args treated as skipbuild options | A compiler flag collides with a skipbuild flag | The `--` separator is optional (`skipbuild cl.exe /c ...` works); add `--` before the compiler to disambiguate: `skipbuild -- cl.exe ...` |
 | Stale objects after compiler upgrade | Compiler fingerprint not captured | Upgrades invalidate automatically via the compiler fingerprint |
 | Whole cache misses after a compiler update/reinstall | Every key includes the compiler fingerprint | Expected for real updates. For reinstalls of an identical binary set `SKIPBUILD_COMPILER_CHECK=content` to keep keys stable. See [Compiler Fingerprinting](#compiler-fingerprinting--cache-invalidation) |
 | Permission errors on cache | Cache dir not writable | Set `SKIPBUILD_DIR` to writable path; check `--clean` |
 | MSVC PDB not restored | `/Zi` but PDB path not tracked | Ensure `/Fo` specifies output; PDB inferred from `.obj` |
-| `--cache-dir` doesn't work | It prints, doesn't set | Use `SKIPBUILD_DIR` env or config file |
+| `--cache-dir` override not kept | It only applies to the current invocation | Set `SKIPBUILD_DIR` (or the config file `cache_dir`) for a persistent location |
 
 ### Limitations
 
@@ -541,7 +549,7 @@ $env:REMAKE_LOG = "debug"
 | FreeBSD / other BSDs | Not tested — POSIX paths should work, no CI |
 | Distributed builds (distcc/icecream) | Not tested |
 | Compiler update invalidates cache | Expected for safety — configurable via `compiler_check`; see [Compiler Fingerprinting](#compiler-fingerprinting--cache-invalidation) |
-| VS generator logging | MSBuild hides a successful tool's stdout/stderr, so `[skipbuild]` lines don't show in the build log. Set `SKIPBUILD_LOG_FILE=<path>` (works everywhere), or raise MSBuild verbosity to *Detailed*, or build from a Developer Command Prompt. `OutputDebugString` only appears while a debugger is attached. |
+| Visual Studio (CMake) generator | `CMAKE_CXX_COMPILER_LAUNCHER` is ignored by the VS generator, so no automatic caching — use Ninja/Make/NMake, or wrap the compiler manually. For output capture set `SKIPBUILD_LOG_FILE` (MSBuild hides a tool's stdout/stderr on success). |
 
 ---
 

@@ -3,7 +3,7 @@
 [![Build and Test](https://github.com/rayyan0x/skipbuild/workflows/Build%20and%20Test/badge.svg)](https://github.com/rayyan0x/skipbuild/actions)
 [![Release](https://img.shields.io/github/v/release/rayyan0x/skipbuild)](https://github.com/rayyan0x/skipbuild/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#supported-platforms-and-compilers)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#-supported-platforms-and-compilers)
 
 **A zero-setup, cross-platform C++ build cache that makes rebuilds near-instant.**
 
@@ -68,16 +68,16 @@ cmake --install build --config Release          # then open a new terminal
 ---
 
 ## 📋 Table of Contents
-- [Why skipbuild](#why-skipbuild)
-- [Benchmarks](#benchmarks)
+- [Why skipbuild](#-why-skipbuild)
+- [Benchmarks](#-benchmarks)
 - [Integration](#-integration-one-time)
-- [How It Works](#how-it-works)
-- [Supported Platforms and Compilers](#supported-platforms-and-compilers)
-- [Configuration](#configuration)
-- [CLI Reference](#cli-reference)
-- [Cache Management](#cache-management)
-- [Troubleshooting & Limitations](#troubleshooting--limitations)
-- [Security, Testing & License](#security-testing--license)
+- [How It Works](#-how-it-works)
+- [Supported Platforms and Compilers](#-supported-platforms-and-compilers)
+- [Configuration](#-configuration)
+- [CLI Reference](#-cli-reference)
+- [Cache Management](#-cache-management)
+- [Troubleshooting & Limitations](#-troubleshooting--limitations)
+- [Security, Testing & License](#-security-testing--license)
 
 ---
 
@@ -261,7 +261,7 @@ The cache key is a SHA-256 over:
 1. **Source file content** — full text of `.cpp`/`.c`/`.cc`
 2. **Normalized include paths** — `-I`/`/I` resolved to build root, forward slashes, case-folded on Windows
 3. **Sorted compiler flags** — all flags except output/file args, sorted for determinism
-4. **Compiler fingerprint** — see [Compiler Fingerprinting](#compiler-fingerprinting--cache-invalidation) below
+4. **Compiler fingerprint** — see [Compiler Fingerprinting](#-compiler-fingerprinting--cache-invalidation) below
 5. **Compiler type + version** — e.g., `MSVC 19.51.36260`, `GCC 13.3`
 6. **Relevant environment** — `SKIPBUILD_*`
 
@@ -580,7 +580,7 @@ $env:REMAKE_LOG = "debug"
 | Cache always misses | Compiler not in PATH, different path each run | Use full path; ensure same compiler binary |
 | Compiler args treated as skipbuild options | A compiler flag collides with a skipbuild flag | The `--` separator is optional (`skipbuild cl.exe /c ...` works); add `--` before the compiler to disambiguate: `skipbuild -- cl.exe ...` |
 | Stale objects after compiler upgrade | Compiler fingerprint not captured | Upgrades invalidate automatically via the compiler fingerprint |
-| Whole cache misses after a compiler update/reinstall | Every key includes the compiler fingerprint | Expected for real updates. For reinstalls of an identical binary set `SKIPBUILD_COMPILER_CHECK=content` to keep keys stable. See [Compiler Fingerprinting](#compiler-fingerprinting--cache-invalidation) |
+| Whole cache misses after a compiler update/reinstall | Every key includes the compiler fingerprint | Expected for real updates. For reinstalls of an identical binary set `SKIPBUILD_COMPILER_CHECK=content` to keep keys stable. See [Compiler Fingerprinting](#-compiler-fingerprinting--cache-invalidation) |
 | Permission errors on cache | Cache dir not writable | Set `SKIPBUILD_DIR` to writable path; check `--clean` |
 | MSVC PDB not restored | `/Zi` but PDB path not tracked | Ensure `/Fo` specifies output; PDB inferred from `.obj` |
 | `--cache-dir` override not kept | It only applies to the current invocation | Set `SKIPBUILD_DIR` (or the config file `cache_dir`) for a persistent location |
@@ -596,7 +596,7 @@ $env:REMAKE_LOG = "debug"
 | Windows/Linux ARM64 | ✅ CI (Ubuntu ARM64, macOS Apple Silicon, Windows ARM64) |
 | FreeBSD / other BSDs | Not tested — POSIX paths should work, no CI |
 | Distributed builds (distcc/icecream) | Not tested |
-| Compiler update invalidates cache | Expected for safety — configurable via `compiler_check`; see [Compiler Fingerprinting](#compiler-fingerprinting--cache-invalidation) |
+| Compiler update invalidates cache | Expected for safety — configurable via `compiler_check`; see [Compiler Fingerprinting](#-compiler-fingerprinting--cache-invalidation) |
 | Visual Studio (CMake) generator | `CMAKE_CXX_COMPILER_LAUNCHER` is ignored by the VS generator, so no automatic caching — use Ninja/Make/NMake, or wrap the compiler manually. For output capture set `SKIPBUILD_LOG_FILE` (MSBuild hides a tool's stdout/stderr on success). |
 
 ---

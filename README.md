@@ -216,7 +216,7 @@ skipbuild -- cl.exe /c main.cpp /Fomain.obj   # MSVC
 
 > The `--` separator is optional: `skipbuild g++ ...` and `skipbuild -- g++ ...` are the same.
 
-### ⚠️ One CMake gotcha
+### ⚠ One CMake gotcha
 
 Use the **Ninja**, **NMake**, or **Makefile** generator. The **Visual Studio** generator ignores skipbuild entirely — nothing gets cached. Fix: add `-G Ninja` (Ninja ships with your VS Build Tools).
 
@@ -252,7 +252,33 @@ If CMake can't find it, configure with `-DCMAKE_PREFIX_PATH=<skipbuild install p
 
 ---
 
-## 🛠️ How It Works
+## 🛠 How It Works
+
+### Hit / Miss / Store Flow
+
+```
+compile command
+       │
+       ▼
+  parse command → compute key
+       │
+       ├─ key in cache? ──YES──► restore outputs → DONE (HIT)
+       │
+       NO
+       │
+       ▼
+  run native compiler
+       │
+       ├─ success? ──NO──► return error (no cache write)
+       │
+       YES
+       │
+       ▼
+  compress (zstd level 3) + sidecars → store atomically
+       │
+       ▼
+  return success (MISS)
+```
 
 ### Deterministic Cache Key Formula
 
@@ -291,32 +317,6 @@ Control this with `--compiler-check`, `SKIPBUILD_COMPILER_CHECK`, or the `compil
 export SKIPBUILD_COMPILER_CHECK=content
 ```
 
-### Hit / Miss / Store Flow
-
-```
-compile command
-       │
-       ▼
-  parse command → compute key
-       │
-       ├─ key in cache? ──YES──► restore outputs → DONE (HIT)
-       │
-       NO
-       │
-       ▼
-  run native compiler
-       │
-       ├─ success? ──NO──► return error (no cache write)
-       │
-       YES
-       │
-       ▼
-  compress (zstd level 3) + sidecars → store atomically
-       │
-       ▼
-  return success (MISS)
-```
-
 ### Excluded Invocations & Boundaries
 
 | Not Cached | Reason |
@@ -328,7 +328,7 @@ compile command
 
 ---
 
-## 🖥️ Supported Platforms and Compilers
+## 🖥 Supported Platforms and Compilers
 
 | OS | Compiler | Version Tested | CI Status |
 |---|---|---|---|
@@ -342,7 +342,7 @@ compile command
 
 ---
 
-## ⚙️ Configuration
+## ⚙ Configuration
 
 **Precedence:** CLI flags > Environment variables > Config file
 
@@ -418,7 +418,7 @@ Options:
 
 ---
 
-## ☁️ Remote Caching
+## ☁ Remote Caching
 
 skipbuild supports remote caching via HTTP/S3-compatible APIs. Configure with:
 
@@ -601,7 +601,7 @@ $env:REMAKE_LOG = "debug"
 
 ---
 
-## 🛡️ Security, Testing & License
+## 🛡 Security, Testing & License
 
 **Security:**
 - Cache stores: compiler output (`.obj`/`.o`), debug sidecars (`.pdb`, `.idb`, `.dwo`), metadata (key, toolchain hash, timestamps). No source code.

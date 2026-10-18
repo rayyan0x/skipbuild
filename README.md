@@ -7,7 +7,7 @@
 
 **A zero-setup, cross-platform C++ build cache that makes rebuilds near-instant.**
 
-> **TL;DR (one time, ~2 minutes):** install with one command → **open a new terminal** → add `-DCMAKE_C_COMPILER_LAUNCHER=skipbuild -DCMAKE_CXX_COMPILER_LAUNCHER=skipbuild` to your `cmake` command (or paste the snippet once to make it permanent) → build with Ninja. Details in [Installation](#-1-installation-one-time-1-minute) and [Integration](#-integration-one-time-under-2-minutes).
+> **TL;DR (one time, ~2 minutes):** install with one command → **open a new terminal** → integrate **once** (pick any one: the `-D..._COMPILER_LAUNCHER=skipbuild` flags, `skipbuild --init`, or the snippet) → build with Ninja. Details in [Installation](#-1-installation-one-time-1-minute) and [Integration](#-integration-one-time).
 
 ---
 
@@ -70,7 +70,7 @@ cmake --install build --config Release          # then open a new terminal
 ## 📋 Table of Contents
 - [Why skipbuild](#why-skipbuild)
 - [Benchmarks](#benchmarks)
-- [Integration](#-integration-one-time-under-2-minutes)
+- [Integration](#-integration-one-time)
 - [How It Works](#how-it-works)
 - [Supported Platforms and Compilers](#supported-platforms-and-compilers)
 - [Configuration](#configuration)
@@ -152,11 +152,15 @@ Real-world measurements on **fmtlib** (~50 source files, CMake, MSVC 19.51, Wind
 
 ---
 
-## 🔄 Integration (one time, under 2 minutes)
+## 🔄 Integration (one time)
 
-skipbuild must run **in front of your compiler**. Find your setup below, run it once, then build normally.
+skipbuild has to run in front of your compiler. Pick the option that matches your project, do it **once**, then build normally. **You only need one — the other options are alternatives, not extra steps.**
 
-### ✅ You use CMake (most people) — nothing to edit, just pass the flag
+### Option A — you use CMake ✅ (most people)
+
+Three ways to do the **same thing**. Pick any *one*:
+
+**A1 · No file edits — pass the flags** (quickest to try)
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -166,16 +170,16 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build build
 ```
 
-Works the same for **MSVC `cl`, GCC `g++`, and Clang `clang++`** — there is no per-compiler setup.
-
-**Want it permanent (for your whole team, no flags)?** Run this from your project root:
+**A2 · One command — let skipbuild edit the file** (run from your project root)
 
 ```bash
-skipbuild --init            # adds the block below to your top-level CMakeLists.txt
-skipbuild --init --dry-run  # preview the change first
+skipbuild --init            # adds the snippet below to your top-level CMakeLists.txt
+skipbuild --init --dry-run  # (optional) preview the change first
 ```
 
-Or paste this yourself, once, right after `project(...)`:
+Now a plain `cmake -S . -B build -G Ninja` (no flags) caches automatically.
+
+**A3 · Manual — paste it yourself** right after `project(...)` in your top-level `CMakeLists.txt`
 
 ```cmake
 find_program(SKIPBUILD_EXE skipbuild)
@@ -185,37 +189,51 @@ if(SKIPBUILD_EXE)
 endif()
 ```
 
-Then everyone just runs `cmake -S . -B build -G Ninja` and gets caching automatically. `--init` is idempotent, preserves line endings, and skips files that are already integrated.
+> A1, A2 and A3 are equivalent — again, **only one is needed**. All three work identically for **MSVC `cl`, GCC `g++`, and Clang `clang++`**; there is nothing compiler-specific to set up.
+>
+> **"Top-level" `CMakeLists.txt`** = the file with `project(...)` at your repo root — not under `build/`, `_deps/`, `third_party/`, or `vendor/`. It applies to all subfolders, so it is added once.
 
-> **Which file is "top-level"?** The one that contains `project(...)` in your repo root — **not** files under `build/`, `_deps/`, `third_party/`, or `vendor/`. It applies to every subfolder, so you paste it **once**.
+### Option B — you don't use CMake
 
-### ❌ You don't use CMake — just put `skipbuild` before the compiler
+Put `skipbuild` in front of your compiler, in whatever builds your project. One line each:
 
-| Your build system | What to write (works for cl, g++, clang++) |
-|---|---|
-| Makefile | `CXX := skipbuild g++`  ·  `skipbuild cl`  ·  `skipbuild clang++` |
-| Hand-written Ninja | `command = skipbuild -- g++ -c $in -o $out $flags` |
-| One-off / manual | `skipbuild -- cl.exe /c main.cpp /Fomain.obj`  ·  `skipbuild -- g++ -c main.cpp -o main.o` |
+**Makefile** (use `skipbuild cl` / `skipbuild clang++` if that is your compiler)
+```make
+CXX := skipbuild g++
+```
 
-> The `--` separator is optional: `skipbuild g++ ...` and `skipbuild -- g++ ...` are equivalent.
+**Hand-written Ninja**
+```ninja
+command = skipbuild -- g++ -c $in -o $out $flags
+```
+
+**One-off / manual compile**
+```bash
+skipbuild -- g++ -c main.cpp -o main.o        # GCC
+skipbuild -- clang++ -c main.cpp -o main.o    # Clang
+skipbuild -- cl.exe /c main.cpp /Fomain.obj   # MSVC
+```
+
+> The `--` separator is optional: `skipbuild g++ ...` and `skipbuild -- g++ ...` are the same.
 
 ### ⚠️ One CMake gotcha
 
 Use the **Ninja**, **NMake**, or **Makefile** generator. The **Visual Studio** generator ignores skipbuild entirely — nothing gets cached. Fix: add `-G Ninja` (Ninja ships with your VS Build Tools).
 
-### How do I know it worked?
+### ✅ Done? — how to confirm and stop
 
-Build, then rebuild — you should see:
+After **one** option above, build, then rebuild. If you see `MISS` then `HIT`, you are finished — there is nothing else to run:
+
 ```
 [skipbuild] MISS 6dbbadbe56d7 -> compiling...
 [skipbuild] HIT  6dbbadbe56d7
 ```
-Or run `skipbuild --stats`.
+Or run `skipbuild --stats` any time.
 
 > Under **VS/MSBuild** the `[skipbuild]` lines are hidden — capture them with `$env:SKIPBUILD_LOG_FILE = "$env:TEMP\skipbuild.log"`.
 
 <details>
-<summary>Advanced: use the installed CMake package (<code>find_package</code>)</summary>
+<summary>Optional: use the installed CMake package (<code>find_package</code>) — only if you ran <code>cmake --install</code></summary>
 
 ```cmake
 find_package(skipbuild REQUIRED)

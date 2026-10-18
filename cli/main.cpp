@@ -1,6 +1,9 @@
 #include "core.hpp"
 #include "config.hpp"
+#include "init.hpp"
 #include <iostream>
+#include <fstream>
+#include <iterator>
 #include <vector>
 #include <string>
 #include <filesystem>
@@ -43,6 +46,7 @@ void print_usage(const char* prog) {
     std::cerr << "  skipbuild --remote-stats              # Show remote cache statistics\n";
     std::cerr << "  skipbuild --clear-stats               # Reset cache statistics to zero\n";
     std::cerr << "  skipbuild --clean                     # Clean cache\n";
+    std::cerr << "  skipbuild --init [CMakeLists.txt]     # Add caching to a CMake project (idempotent)\n";
     std::cerr << "  skipbuild --version                   # Show version\n";
     std::cerr << "\n";
     std::cerr << "Options:\n";
@@ -200,6 +204,81 @@ int run_compiler(const std::vector<std::string>& args) {
     return spawn_argv(args);
 }
 
+// `skipbuild --init [path] [--dry-run]`: insert the integration snippet into a
+// CMakeLists.txt, right after project(...). Idempotent.
+int run_init_command(int argc, char** argv) {
+    bool dry_run = false;
+    fs::path target;
+    for (int i = 2; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--dry-run" || a == "--print" || a == "-n") {
+            dry_run = true;
+        } else if (target.empty()) {
+            target = a;
+        }
+    }
+    if (target.empty()) target = "CMakeLists.txt";
+
+    std::error_code ec;
+    if (fs::is_directory(target, ec)) target /= "CMakeLists.txt";
+    if (!fs::exists(target, ec)) {
+        std::cerr << "[skipbuild] " << target.string() << " not found.\n"
+                  << "Run this from your project root, or pass a path:\n"
+                  << "  skipbuild --init path/to/CMakeLists.txt\n";
+        return 1;
+    }
+
+    std::ifstream in(target, std::ios::binary);
+    if (!in) {
+        std::cerr << "[skipbuild] cannot open " << target.string() << "\n";
+        return 1;
+    }
+    std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+
+    // Preserve a UTF-8 BOM if present.
+    std::string bom;
+    if (raw.size() >= 3 &&
+        static_cast<unsigned char>(raw[0]) == 0xEF &&
+        static_cast<unsigned char>(raw[1]) == 0xBB &&
+        static_cast<unsigned char>(raw[2]) == 0xBF) {
+        bom = raw.substr(0, 3);
+        raw = raw.substr(3);
+    }
+
+    auto result = skipbuild::apply_integration(raw);
+    if (result.status == skipbuild::InitStatus::AlreadyDone) {
+        std::cout << "[skipbuild] " << target.string()
+                  << " is already integrated. Nothing to do.\n";
+        return 0;
+    }
+    if (result.status == skipbuild::InitStatus::Error) {
+        std::cerr << "[skipbuild] no `project(...)` or `cmake_minimum_required(...)` "
+                  << "found in " << target.string() << ".\n"
+                  << "Add this right after `project(...)` yourself:\n\n"
+                  << skipbuild::integration_snippet("\n");
+        return 1;
+    }
+    if (dry_run) {
+        std::cout << "[skipbuild] would insert into " << target.string() << ":\n\n"
+                  << skipbuild::integration_snippet("\n");
+        return 0;
+    }
+
+    std::ofstream out(target, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        std::cerr << "[skipbuild] cannot write " << target.string() << "\n";
+        return 1;
+    }
+    out << bom << result.content;
+    out.close();
+
+    std::cout << "[skipbuild] integrated " << target.string() << "\n\n"
+              << "Build with Ninja so caching kicks in:\n"
+              << "  cmake -S . -B build -G Ninja && cmake --build build\n";
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     // Handle skipbuild-specific commands first
     if (argc >= 2) {
@@ -328,6 +407,9 @@ int main(int argc, char* argv[]) {
         fs::remove_all(config.cache_dir);
         std::cout << "Cache cleaned" << std::endl;
         return 0;
+    }
+    if (arg1 == "--init") {
+        return run_init_command(filtered_argc, filtered_argv_data);
     }
     if (arg1 == "--remote-stats") {
         auto cache = skipbuild::Cache(config.cache_dir, config);

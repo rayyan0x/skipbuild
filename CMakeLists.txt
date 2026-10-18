@@ -56,6 +56,10 @@ foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determ
     target_link_libraries(test_${t} remake_core)
 endforeach()
 
+add_executable(test_init tests/test_init.cpp)
+target_link_libraries(test_init remake_core)
+target_include_directories(test_init PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cli)
+
 add_test(NAME cache_test COMMAND test_cache)
 add_test(NAME concurrent_test COMMAND test_concurrent)
 add_test(NAME multiprocess_test COMMAND test_multiprocess 0)
@@ -68,6 +72,7 @@ add_test(NAME config_test COMMAND test_config)
 add_test(NAME stats_test COMMAND test_stats)
 add_test(NAME pch_test COMMAND test_pch)
 add_test(NAME response_file_test COMMAND test_response_file)
+add_test(NAME init_test COMMAND test_init)
 
 # Install targets
 install(TARGETS skipbuild

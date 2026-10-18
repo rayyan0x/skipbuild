@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `skipbuild --init [CMakeLists.txt] [--dry-run]` — writes the compiler-launcher snippet right after `project(...)`, so integration is one command instead of a manual edit. It is idempotent (skips files that already set a launcher), preserves CRLF line endings and a UTF-8 BOM, falls back to `cmake_minimum_required(...)` when there is no `project()`, and prints the snippet to add when it finds no safe insertion point. Covered by `test_init`.
+
+### Fixed
+- Quoted compiler defines (e.g. `-DFOO="bar"`, MSVC `-DSKIPBUILD_VERSION="0.2.2"`) now reach the compiler intact — the compiler is replayed with an argv-preserving spawn instead of going through `std::system`/`cmd.exe`, which stripped inner quotes.
+
+### Documentation
+- Reworked the README "Integration" section to lead with the no-edit path (two `-D` flags), then `skipbuild --init`, then the manual snippet, with a compact per-build-system table and a single "VS generator is not supported" gotcha.
+
 ## [0.2.2] - 2026-10-18
 
 ### Added

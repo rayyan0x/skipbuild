@@ -78,11 +78,11 @@ if (-not (Test-Path $InstallDir)) {
 $TempFile = [IO.Path]::GetTempFileName()
 try {
     Write-Host "Downloading from $Url"
-    Invoke-WebRequest -Uri $Url -OutFile $TempFile -ErrorAction Stop
+    Invoke-WebRequest -Uri $Url -OutFile $TempFile -UseBasicParsing -ErrorAction Stop
 
     # Verify checksum if available
     try {
-        $sums = Invoke-WebRequest -Uri $SumsUrl -ErrorAction Stop
+        $sums = Invoke-WebRequest -Uri $SumsUrl -UseBasicParsing -ErrorAction Stop
         $expected = ($sums.Content -split "`n" | Where-Object { $_ -like "*skipbuild-windows-x64.exe" }) -split '\s+' | Select-Object -First 1
         $actual = (Get-FileHash -Path $TempFile -Algorithm SHA256).Hash.ToLower()
         if ($expected -and $expected -ne $actual) {

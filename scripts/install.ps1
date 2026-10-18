@@ -100,16 +100,22 @@ try {
     Move-Item -Path $TempFile -Destination $dest -Force
     Write-Host "Installed skipbuild.exe to $dest"
 
-    # Add to user PATH if not already present
+    # Make it usable in THIS window immediately
+    if ($env:PATH -notlike "*$InstallDir*") {
+        $env:PATH = "$InstallDir;$env:PATH"
+    }
+
+    # Persist for future terminals
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($userPath -notlike "*$InstallDir*") {
-        $newPath = $userPath + ";" + $InstallDir
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        Write-Host "Added $InstallDir to user PATH"
-        Write-Host "Restart your shell for PATH changes to take effect"
-    } else {
-        Write-Host "$InstallDir already in PATH"
+        [Environment]::SetEnvironmentVariable("Path", ($userPath + ";" + $InstallDir), "User")
+        Write-Host "Added $InstallDir to your user PATH (applies to new terminals)."
     }
+
+    Write-Host ""
+    Write-Host "skipbuild is ready." -ForegroundColor Green
+    Write-Host "  Verify:  skipbuild --version"
+    Write-Host "  CMake:   paste the 4-line snippet from the README 'Integration' section once."
 
 } finally {
     if (Test-Path $TempFile) { Remove-Item -Force $TempFile }

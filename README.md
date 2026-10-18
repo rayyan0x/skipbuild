@@ -7,54 +7,62 @@
 
 **A zero-setup, cross-platform C++ build cache that makes rebuilds near-instant.**
 
+> **TL;DR (one time, ~2 minutes):** install with one command → **open a new terminal** → paste 4 lines into your top-level `CMakeLists.txt` → build with Ninja. Details in [Installation](#-1-installation-one-time-1-minute) and [Integration](#-integration-one-time-under-2-minutes).
+
 ---
 
-## ⚡ 1. Installation & Quick Start
+## ⚡ 1. Installation (one time, ~1 minute)
 
-### Step 1: Build from Source
-```bash
-git clone https://github.com/rayyan0x/skipbuild.git
-cd skipbuild
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel
-```
+skipbuild is a single, dependency-free binary. Install it **once** — it then works with **every** project on the machine.
 
-### Step 2: Environment Setup / Install
-
-**macOS / Linux:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.sh | bash
-```
+### Install
 
 **Windows (PowerShell 5.1+):**
 ```powershell
 irm https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.ps1 | iex
 ```
 
-> **Note:** Installs a pre-built binary from GitHub Releases. Both scripts verify the SHA-256 checksum; the Windows script also adds the install directory to your user `PATH`.
-
-**From source build:**
+**Linux / macOS:**
 ```bash
-cmake --install build --config Release --prefix ~/.local   # Linux/macOS
-cmake --install build --config Release --prefix $env:USERPROFILE\.local  # Windows
+curl -fsSL https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.sh | bash
 ```
 
-### Step 3: 30-Second Verification Test
+Both installers download the prebuilt binary from GitHub Releases, **verify its SHA-256**, and add it to your `PATH`. The Windows installer also makes it usable in the current window right away.
+
+### Confirm
+
 ```powershell
-# Developer PowerShell for VS 2022
+skipbuild --version      # -> skipbuild 0.2.2
+```
+
+> **Terminal already open?** Operating systems apply `PATH` changes only to processes started *afterwards*. If `skipbuild` isn't found:
+> - **Open a new terminal** (using VS Code? quit it completely and reopen), **or**
+> - enable it in the current window only:
+>   ```powershell
+>   $env:PATH = "$env:LOCALAPPDATA\skipbuild\bin;$env:PATH"   # Windows
+>   ```
+> This is standard OS behavior, not a skipbuild issue.
+
+### 20-second smoke test (optional)
+
+```powershell
 echo '#include <stdio.h>
-int main() { printf("Hello, skipbuild!\n"); return 0; }' > hello.cpp
+int main(){ printf("hello\n"); return 0; }' > hello.cpp
 
-# Cold run (MISS)
-build\Release\skipbuild.exe -- cl.exe /c hello.cpp /Fohello.obj
-# [skipbuild] MISS 48476142e635 -> compiling...
+skipbuild -- cl.exe /c hello.cpp /Fohello.obj   # -> [skipbuild] MISS ... -> compiling...
+skipbuild -- cl.exe /c hello.cpp /Fohello.obj   # -> [skipbuild] HIT ...
+skipbuild --stats
+```
+On Linux/macOS substitute `g++` or `clang++` for `cl.exe`.
 
-# Hot run (HIT)
-build\Release\skipbuild.exe -- cl.exe /c hello.cpp /Fohello.obj
-# [skipbuild] HIT 48476142e635
+### Alternative: build from source
 
-# Verify stats
-build\Release\skipbuild.exe --stats
+Only needed if you don't want the prebuilt binary:
+```bash
+git clone https://github.com/rayyan0x/skipbuild.git && cd skipbuild
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
+cmake --install build --config Release          # then open a new terminal
 ```
 
 ---
@@ -62,7 +70,7 @@ build\Release\skipbuild.exe --stats
 ## 📋 Table of Contents
 - [Why skipbuild](#why-skipbuild)
 - [Benchmarks](#benchmarks)
-- [Integration](#integration)
+- [Integration](#-integration-one-time-under-2-minutes)
 - [How It Works](#how-it-works)
 - [Supported Platforms and Compilers](#supported-platforms-and-compilers)
 - [Configuration](#configuration)
@@ -144,31 +152,72 @@ Real-world measurements on **fmtlib** (~50 source files, CMake, MSVC 19.51, Wind
 
 ---
 
-## 🔄 Integration
+## 🔄 Integration (one time, under 2 minutes)
 
-### A. Global / Automatic Integration
+skipbuild is a **compiler launcher** — a wrapper that runs *in front of* your compiler. You enable it **once per project**, then every source file is cached automatically. After that you just build normally.
 
-**CMake (Ninja/Make generators):**
+> **The one rule:** the compiler launcher is honored by the **Ninja**, **NMake**, and **Makefile** generators. The **Visual Studio** generator ignores it (a CMake limitation), so skipbuild is never called there. On Windows, use **Ninja** — it ships with your VS Build Tools.
+
+### Step 1 — paste 4 lines into your top-level `CMakeLists.txt`
+
+This works unchanged for **MSVC `cl`, GCC `g++`, and Clang `clang++`**:
+
 ```cmake
-set(CMAKE_CXX_COMPILER_LAUNCHER "skipbuild")
+# ---- skipbuild: paste once ----
+find_program(SKIPBUILD_EXE skipbuild)
+if(SKIPBUILD_EXE)
+  set(CMAKE_C_COMPILER_LAUNCHER   "${SKIPBUILD_EXE}")
+  set(CMAKE_CXX_COMPILER_LAUNCHER "${SKIPBUILD_EXE}")
+endif()
+# ------------------------------
 ```
 
-**CMake (per-target):**
-```cmake
-set_target_properties(my_target PROPERTIES
-    CXX_COMPILER_LAUNCHER "skipbuild"
-)
+`find_program` also resolves the binary's full path, so this keeps working even if `PATH` isn't set up.
+
+### Step 2 — build with Ninja
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
 
-**Ninja (`build.ninja`):**
+That is the entire integration. The first build is `MISS` (fills the cache); every clean rebuild after is `HIT`.
+
+**Prefer no file edits?** Same result from the command line:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER_LAUNCHER=skipbuild \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=skipbuild
+```
+
+### Optional — use the installed CMake package
+
+```cmake
+find_package(skipbuild REQUIRED)
+skipbuild_enable()                 # every target in this directory tree
+skipbuild_enable_target(my_lib)    # or enable just one target
+```
+If CMake can't find it, configure with `-DCMAKE_PREFIX_PATH=<skipbuild install prefix>`.
+
+### Per-compiler reference
+
+The launcher always goes **before** the compiler — identical for all three toolchains:
+
+| Compiler | Single compile | Makefile |
+|---|---|---|
+| MSVC `cl.exe` | `skipbuild -- cl.exe /c main.cpp /Fomain.obj` | `CXX := skipbuild cl` |
+| GCC `g++` | `skipbuild -- g++ -c main.cpp -o main.o` | `CXX := skipbuild g++` |
+| Clang `clang++` | `skipbuild -- clang++ -c main.cpp -o main.o` | `CXX := skipbuild clang++` |
+
+**Ninja (`build.ninja`)**
 ```ninja
 rule cxx
   command = skipbuild -- g++ -c $in -o $out $flags
-
 build main.o: cxx main.cpp
 ```
 
-**Make (`Makefile`):**
+**Make (`Makefile`)**
 ```make
 CXX := skipbuild g++
 CXXFLAGS := -Iinclude -O2
@@ -177,7 +226,9 @@ main.o: main.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 ```
 
-> **CMake generators:** `CMAKE_<LANG>_COMPILER_LAUNCHER` is honored only by the **Ninja** and **Makefile** generators (including NMake). The **Visual Studio** generator ignores it — *skipbuild* is never invoked and no cache entries are created. Use Ninja/Make for automatic caching, or wrap the compiler manually (see below).
+> The `--` separator is optional: `skipbuild g++ ...` and `skipbuild -- g++ ...` are equivalent.
+
+> **CMake generators:** `CMAKE_<LANG>_COMPILER_LAUNCHER` is honored only by the **Ninja** and **Makefile** generators (including NMake). The **Visual Studio** generator ignores it — *skipbuild* is never invoked and no cache entries are created. Use Ninja/Make for automatic caching, or wrap the compiler manually (see the per-compiler reference above).
 >
 > **Seeing `[skipbuild]` output under MSBuild/VS:** MSBuild hides a successful tool's stdout/stderr at normal verbosity, so even when the launcher does run, the `[skipbuild]` lines won't appear in the build log. Set `SKIPBUILD_LOG_FILE` to append timestamped log lines to a file — this works in every build system:
 > ```powershell
@@ -185,23 +236,20 @@ main.o: main.cpp
 > ```
 > Alternatively raise **Tools → Options → Projects and Solutions → Build and Run → MSBuild project build output verbosity** to *Detailed* (combine with `REMAKE_LOG=debug`). `OutputDebugString` is also emitted under VS, but Visual Studio only shows it in the **Output → Debug** pane **while a debugger is attached**.
 
-### B. Isolated / Target-Specific Configuration
+### How to tell it's working
 
-**After install:**
-```cmake
-find_package(skipbuild REQUIRED)
-skipbuild_enable_target(my_target)
+Look for these lines in your build output (or run `skipbuild --stats`):
+
+```
+[skipbuild] MISS 6dbbadbe56d7 -> compiling...
+[skipbuild] HIT  6dbbadbe56d7
 ```
 
-**MSVC manual (verified):**
-```powershell
-skipbuild -- cl.exe /c hello.cpp /Fohello.obj
-```
+### One-time, then forget it
 
-**Generic wrapper:**
-```bash
-skipbuild -- clang++ -c foo.cpp -o foo.o -Iinclude -O2
-```
+- **Install** — once per machine (Section 1).
+- **The 4-line snippet** — once per project (commit it; everyone who builds gets caching).
+- Everything after that is just a normal build.
 
 ---
 

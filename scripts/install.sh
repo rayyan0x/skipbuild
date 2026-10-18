@@ -68,8 +68,20 @@ fi
 mv "$TMP" "$INSTALL_DIR/skipbuild"
 echo "Installed skipbuild to $INSTALL_DIR/skipbuild"
 
-# Check PATH
+# Make it usable immediately in this shell, and explain how to persist it
 case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
-    *) echo "Note: Add $INSTALL_DIR to your PATH" ;;
+    *)
+        export PATH="$INSTALL_DIR:$PATH"
+        echo ""
+        echo "NOTE: '$INSTALL_DIR' is not on your PATH yet."
+        echo "      This window can use skipbuild now. To make it permanent, add:"
+        echo "        export PATH=\"$INSTALL_DIR:\$PATH\""
+        echo "      to your ~/.bashrc or ~/.zshrc, then open a new terminal."
+        ;;
 esac
+
+echo ""
+echo "skipbuild is ready."
+echo "  Verify:  skipbuild --version"
+echo "  CMake:   paste the 4-line snippet from the README 'Integration' section once."

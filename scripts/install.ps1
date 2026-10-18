@@ -76,20 +76,21 @@ if (-not (Test-Path $InstallDir)) {
 
 # Download binary
 $TempFile = [IO.Path]::GetTempFileName()
+$SumFile = "$TempFile.sums"
 try {
     Write-Host "Downloading from $Url"
     Invoke-WebRequest -Uri $Url -OutFile $TempFile -UseBasicParsing -ErrorAction Stop
 
     # Verify checksum if available
     try {
-        $sums = Invoke-WebRequest -Uri $SumsUrl -UseBasicParsing -ErrorAction Stop
-        $expected = ($sums.Content -split "`n" | Where-Object { $_ -like "*skipbuild-windows-x64.exe" }) -split '\s+' | Select-Object -First 1
+        Invoke-WebRequest -Uri $SumsUrl -OutFile $SumFile -UseBasicParsing -ErrorAction Stop
+        $expected = (Get-Content $SumFile | Where-Object { $_ -like "*skipbuild-windows-x64.exe" }) -split '\s+' | Select-Object -First 1
         $actual = (Get-FileHash -Path $TempFile -Algorithm SHA256).Hash.ToLower()
         if ($expected -and $expected -ne $actual) {
             Write-Error "Checksum mismatch! Expected $expected, got $actual"
             exit 1
         }
-        Write-Host "Checksum verified"
+        if ($expected) { Write-Host "Checksum verified" } else { Write-Warning "Asset not listed in SHA256SUMS; skipping verification" }
     } catch {
         Write-Warning "Could not verify checksum (SHA256SUMS not available): $_"
     }
@@ -112,4 +113,5 @@ try {
 
 } finally {
     if (Test-Path $TempFile) { Remove-Item -Force $TempFile }
+    if (Test-Path $SumFile) { Remove-Item -Force $SumFile }
 }

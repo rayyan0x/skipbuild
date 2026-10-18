@@ -51,21 +51,16 @@ target_link_libraries(skipbuild remake_core)
 # Tests
 enable_testing()
 
-foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats pch response_file key_soundness)
-    add_executable(test_${t} tests/test_${t}.cpp)
-    target_link_libraries(test_${t} remake_core)
-endforeach()
-
-add_executable(test_init tests/test_init.cpp)
-target_link_libraries(test_init remake_core)
-target_include_directories(test_init PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cli)
-
-# Optional strict warnings / sanitizers, applied only to our own targets so that
-# the vendored zstd build is unaffected.
+# Optional strict warnings / sanitizers.
+# - Warnings-as-errors applies to the shipped targets only.
+# - Sanitizer flags must reach every executable that links the instrumented
+#   core library (including tests), so both compile and link options are set on
+#   each target; a static library is not linked, so link options must be on the
+#   executables.
 option(SKIPBUILD_WERROR "Treat compiler warnings as errors (/W4 /WX or -Wall -Wextra -Werror)" OFF)
 option(SKIPBUILD_SANITIZE "Enable AddressSanitizer + UBSan (GCC/Clang only)" OFF)
 
-function(skipbuild_strict_flags target)
+function(skipbuild_werror target)
     if(SKIPBUILD_WERROR)
         if(MSVC)
             target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -74,14 +69,30 @@ function(skipbuild_strict_flags target)
             target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
         endif()
     endif()
+endfunction()
+
+function(skipbuild_sanitize target)
     if(SKIPBUILD_SANITIZE AND NOT MSVC)
         target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${target} PRIVATE -fsanitize=address,undefined)
     endif()
 endfunction()
 
-skipbuild_strict_flags(remake_core)
-skipbuild_strict_flags(skipbuild)
+foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats pch response_file key_soundness)
+    add_executable(test_${t} tests/test_${t}.cpp)
+    target_link_libraries(test_${t} remake_core)
+    skipbuild_sanitize(test_${t})
+endforeach()
+
+add_executable(test_init tests/test_init.cpp)
+target_link_libraries(test_init remake_core)
+target_include_directories(test_init PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cli)
+skipbuild_sanitize(test_init)
+
+foreach(tgt remake_core skipbuild)
+    skipbuild_werror(${tgt})
+    skipbuild_sanitize(${tgt})
+endforeach()
 
 add_test(NAME cache_test COMMAND test_cache)
 add_test(NAME concurrent_test COMMAND test_concurrent)

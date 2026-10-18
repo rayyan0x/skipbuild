@@ -15,11 +15,12 @@ jobs:
           # x64 platforms
           - os: windows-latest
           - os: ubuntu-latest
-          - os: macos-latest
+          - os: macos-15-intel
+            name: "macOS x64 (Intel)"
           # ARM64 platforms
           - os: ubuntu-24.04-arm
             name: "Ubuntu ARM64"
-          - os: macos-14
+          - os: macos-latest
             name: "macOS ARM64 (Apple Silicon)"
           - os: windows-11-arm
             name: "Windows ARM64"

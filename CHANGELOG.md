@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-10-18
+
+### Added
+- macOS x64 (Intel) release builds (`skipbuild-macos-x64`) via the `macos-15-intel` runner, so Intel Macs no longer 404 on install.
+
+### Fixed
+- `scripts/install.ps1` checksum verification on Windows PowerShell 5.1: use `-UseBasicParsing` and download `SHA256SUMS` to a file before comparing (GitHub serves it as binary, so the previous in-memory comparison silently never ran).
+
 ## [0.2.1] - 2026-10-18
 
 ### Added

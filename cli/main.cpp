@@ -13,6 +13,7 @@
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
+#include <optional>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -204,6 +205,195 @@ int run_compiler(const std::vector<std::string>& args) {
     return spawn_argv(args);
 }
 
+// Run a process, capturing its combined stdout+stderr. Returns false if the
+// process could not be started at all.
+#ifdef _WIN32
+static bool capture_argv(const std::vector<std::string>& args, std::string& out, int& exit_code) {
+    if (args.empty()) return false;
+
+    std::string prog = args[0];
+    if (prog.find('/') == std::string::npos && prog.find('\\') == std::string::npos) {
+        prog = find_compiler_in_path(prog);
+    }
+
+    std::string cmdline;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (i) cmdline += ' ';
+        append_windows_arg(cmdline, args[i]);
+    }
+    std::vector<char> buf(cmdline.begin(), cmdline.end());
+    buf.push_back('\0');
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = nullptr;
+
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    // A valid inheritable stdin is required when STARTF_USESTDHANDLES is set,
+    // otherwise CreateProcess fails on the NULL handle.
+    HANDLE nul = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, OPEN_EXISTING, 0, nullptr);
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    si.hStdInput = (nul != INVALID_HANDLE_VALUE) ? nul : GetStdHandle(STD_INPUT_HANDLE);
+
+    PROCESS_INFORMATION pi{};
+    BOOL ok = CreateProcessA(prog.c_str(), buf.data(), nullptr, nullptr, TRUE,
+                             0, nullptr, nullptr, &si, &pi);
+    CloseHandle(wr);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!ok) {
+        CloseHandle(rd);
+        return false;
+    }
+
+    char temp[4096];
+    DWORD nread = 0;
+    while (ReadFile(rd, temp, sizeof(temp), &nread, nullptr) && nread > 0) {
+        out.append(temp, nread);
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    exit_code = static_cast<int>(code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    CloseHandle(rd);
+    return true;
+}
+#else
+static bool capture_argv(const std::vector<std::string>& args, std::string& out, int& exit_code) {
+    if (args.empty()) return false;
+
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
+    if (pid == 0) {
+        dup2(fds[1], 1);
+        dup2(fds[1], 2);
+        close(fds[0]);
+        close(fds[1]);
+        execvp(argv[0], argv.data());
+        _exit(127);
+    }
+    close(fds[1]);
+
+    char temp[4096];
+    ssize_t n;
+    while ((n = read(fds[0], temp, sizeof(temp))) > 0) {
+        out.append(temp, static_cast<size_t>(n));
+    }
+    close(fds[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    return true;
+}
+#endif
+
+// Discover the header files a translation unit depends on by running the
+// compiler in preprocess/parse-only mode. Returns nullopt if discovery could
+// not be performed (in which case the caller must bypass the cache rather than
+// risk a stale hit).
+static std::optional<std::vector<std::string>> discover_dependencies(
+    const std::vector<std::string>& compiler_args,
+    skipbuild::CompilerType type) {
+
+    std::vector<std::string> dep_args;
+    if (type == skipbuild::CompilerType::MSVC) {
+        for (size_t i = 0; i < compiler_args.size(); ++i) {
+            const std::string& a = compiler_args[i];
+            if (a.rfind("/Fo", 0) == 0 || a.rfind("/Fd", 0) == 0) {
+                if (a.size() == 3 && i + 1 < compiler_args.size()) ++i;
+                continue;
+            }
+            dep_args.push_back(a);
+        }
+        dep_args.push_back("/nologo");
+        dep_args.push_back("/showIncludes");
+        dep_args.push_back("/Zs");
+    } else {
+        for (size_t i = 0; i < compiler_args.size(); ++i) {
+            const std::string& a = compiler_args[i];
+            if (a == "-c") continue;
+            if (a == "-o" || a == "-MF" || a == "-MT" || a == "-MQ") {
+                if (i + 1 < compiler_args.size()) ++i;
+                continue;
+            }
+            if (a.rfind("-o", 0) == 0 || a.rfind("-MF", 0) == 0) continue;
+            dep_args.push_back(a);
+        }
+        dep_args.push_back("-MM");
+        dep_args.push_back("-MG");
+    }
+
+    std::string output;
+    int exit_code = 0;
+    if (!capture_argv(dep_args, output, exit_code)) return std::nullopt;
+
+    std::vector<std::string> deps;
+    std::istringstream iss(output);
+    std::string line;
+
+    if (type == skipbuild::CompilerType::MSVC) {
+        const std::string marker = "Note: including file:";
+        while (std::getline(iss, line)) {
+            auto pos = line.find(marker);
+            if (pos == std::string::npos) continue;
+            std::string p = line.substr(pos + marker.size());
+            size_t s = p.find_first_not_of(" \t\r\n");
+            if (s == std::string::npos) continue;
+            size_t e = p.find_last_not_of(" \t\r\n");
+            deps.push_back(p.substr(s, e - s + 1));
+        }
+        if (exit_code != 0 && deps.empty()) return std::nullopt;
+    } else {
+        // makefile-style: "target: dep1 dep2 \", with '\' line continuations.
+        std::string joined;
+        while (std::getline(iss, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty() && line.back() == '\\') {
+                joined += line.substr(0, line.size() - 1);
+                joined += ' ';
+            } else {
+                joined += line;
+                joined += '\n';
+            }
+        }
+        std::istringstream js(joined);
+        while (std::getline(js, line)) {
+            auto colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::istringstream ts(line.substr(colon + 1));
+            std::string tok;
+            while (ts >> tok) deps.push_back(tok);
+        }
+        if (exit_code != 0) return std::nullopt;
+    }
+    return deps;
+}
+
 // `skipbuild --init [path] [--dry-run]`: insert the integration snippet into a
 // CMakeLists.txt, right after project(...). Idempotent.
 int run_init_command(int argc, char** argv) {
@@ -277,6 +467,34 @@ int run_init_command(int argc, char** argv) {
               << "Build with Ninja so caching kicks in:\n"
               << "  cmake -S . -B build -G Ninja && cmake --build build\n";
     return 0;
+}
+
+// Evict old/oversized cache entries. Runs at most once every few minutes, using
+// a marker file in the cache root so the throttle is shared across the short-
+// lived launcher processes (an in-process timer would reset every invocation).
+static void maybe_prune(skipbuild::Cache& cache, const skipbuild::CacheConfig& config) {
+    if (config.read_only) return;
+
+    static constexpr int64_t kMinIntervalSeconds = 300;
+    std::filesystem::path marker = config.cache_dir / ".last_cleanup";
+    std::error_code ec;
+
+    if (std::filesystem::exists(marker, ec) && !ec) {
+        auto last = std::filesystem::last_write_time(marker, ec);
+        if (!ec) {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                std::filesystem::file_time_type::clock::now() - last).count();
+            if (age >= 0 && age < kMinIntervalSeconds) return;
+        }
+    }
+
+    // Touch the marker before pruning so concurrent processes don't all scan.
+    {
+        std::ofstream touch(marker, std::ios::trunc);
+        touch << "cleanup\n";
+    }
+
+    cache.prune(config.max_cache_size_bytes, config.max_age_days);
 }
 
 int main(int argc, char* argv[]) {
@@ -620,28 +838,19 @@ int main(int argc, char* argv[]) {
         if (!outputs.empty()) {
             cache.safe_put(key, outputs);
             skipbuild::log_debug("Stored in cache (" + std::to_string(outputs.size()) + " files)");
+            maybe_prune(cache, config);
         }
         
         return 0;
     }
     
     // Compiler command
-    // Get actual dependencies using compiler -MMD
-    auto deps = skipbuild::get_dependencies(compiler_argv, compiler_argc);
-    if (debug) {
-        std::cerr << "[skipbuild] Dependencies found: " << deps.size() << "\n";
-        for (auto& d : deps) std::cerr << "[skipbuild]   " << d << "\n";
-    }
-    
     auto cmd = skipbuild::parse_compile_command(compiler_argc, compiler_argv);
     if (!cmd) {
         // Not a compile command we understand, passthrough
         std::vector<std::string> args(compiler_argv, compiler_argv + compiler_argc);
         return run_compiler(args);
     }
-    
-    // Add actual dependencies to includes for hashing
-    cmd->includes.insert(cmd->includes.end(), deps.begin(), deps.end());
     
     // Only cache compilation (-c or /c flag produces .o/.obj)
     bool is_compile_only = false;
@@ -651,6 +860,25 @@ int main(int argc, char* argv[]) {
     if (!is_compile_only) {
         std::vector<std::string> args(compiler_argv, compiler_argv + compiler_argc);
         return run_compiler(args);
+    }
+    
+    // Discover the headers this translation unit depends on so that editing any
+    // header (directly or transitively) invalidates the cache entry. If we
+    // cannot determine the dependency set, bypass the cache entirely rather
+    // than risk returning a stale object.
+    {
+        std::vector<std::string> raw_args(compiler_argv, compiler_argv + compiler_argc);
+        auto ctype = skipbuild::detect_compiler(cmd->compiler_path).type;
+        auto deps = discover_dependencies(raw_args, ctype);
+        if (!deps) {
+            skipbuild::log_debug("Dependency discovery unavailable; bypassing cache");
+            return run_compiler(raw_args);
+        }
+        if (debug) {
+            std::cerr << "[skipbuild] Dependencies found: " << deps->size() << "\n";
+            for (auto& d : *deps) std::cerr << "[skipbuild]   " << d << "\n";
+        }
+        cmd->dependencies = *deps;
     }
     
     // Get cache
@@ -756,6 +984,7 @@ int main(int argc, char* argv[]) {
     if (!outputs.empty()) {
         cache.safe_put(key, outputs, sidecars);
         skipbuild::log_debug("Stored in cache (" + std::to_string(outputs.size()) + " outputs, " + std::to_string(sidecars.size()) + " sidecars)");
+        maybe_prune(cache, config);
     }
     
     return 0;

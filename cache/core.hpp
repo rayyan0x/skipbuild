@@ -129,6 +129,7 @@ struct CompileCommand {
     std::vector<std::string> args;
     std::vector<std::string> includes;
     std::vector<std::string> flags;
+    std::vector<std::string> dependencies;  // resolved header files (from dep discovery)
     std::string compiler_path;
     std::string compiler_hash;
     PCHInfo pch;
@@ -274,7 +275,6 @@ std::string get_compiler_hash_with_version(const std::string& compiler_path);
 // the CLI overrides it from the loaded config via set_compiler_check_mode().
 CompilerCheckMode get_compiler_check_mode();
 void set_compiler_check_mode(CompilerCheckMode mode);
-std::vector<std::string> get_dependencies(char** argv, int argc);
 std::vector<std::string> canonicalize_flags(const std::vector<std::string>& flags, CompilerType type);
 
 // Path normalization for cache key determinism

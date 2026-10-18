@@ -106,7 +106,7 @@ int64_t ConfigParser::parse_size(const std::string& size_str) {
     // Check for unit suffix
     char unit = 0;
     if (!s.empty() && std::isalpha(static_cast<unsigned char>(s.back()))) {
-        unit = std::toupper(static_cast<unsigned char>(s.back()));
+        unit = static_cast<char>(std::toupper(static_cast<unsigned char>(s.back())));
         s = s.substr(0, s.size() - 1);
     }
     
@@ -278,8 +278,8 @@ CacheConfig ConfigParser::load_config(
     
     if (const char* env = get_env("SKIPBUILD_DIR", "BUILDCACHE_DIR")) {
         config.cache_dir = env;
-    } else if (const char* env = get_env("SKIPBUILD_CACHE_DIR", "BUILDCACHE_CACHE_DIR")) {
-        config.cache_dir = env;
+    } else if (const char* cache_dir_env = get_env("SKIPBUILD_CACHE_DIR", "BUILDCACHE_CACHE_DIR")) {
+        config.cache_dir = cache_dir_env;
     }
     
     if (const char* env = get_env("SKIPBUILD_MAX_SIZE", "BUILDCACHE_MAX_SIZE")) {

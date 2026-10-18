@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(skipbuild LANGUAGES CXX VERSION 0.2.2)
+project(skipbuild LANGUAGES CXX VERSION 0.3.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -51,7 +51,7 @@ target_link_libraries(skipbuild remake_core)
 # Tests
 enable_testing()
 
-foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats pch response_file)
+foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats pch response_file key_soundness)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} remake_core)
 endforeach()
@@ -59,6 +59,29 @@ endforeach()
 add_executable(test_init tests/test_init.cpp)
 target_link_libraries(test_init remake_core)
 target_include_directories(test_init PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cli)
+
+# Optional strict warnings / sanitizers, applied only to our own targets so that
+# the vendored zstd build is unaffected.
+option(SKIPBUILD_WERROR "Treat compiler warnings as errors (/W4 /WX or -Wall -Wextra -Werror)" OFF)
+option(SKIPBUILD_SANITIZE "Enable AddressSanitizer + UBSan (GCC/Clang only)" OFF)
+
+function(skipbuild_strict_flags target)
+    if(SKIPBUILD_WERROR)
+        if(MSVC)
+            target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+            target_compile_options(${target} PRIVATE /W4 /WX /permissive- /external:anglebrackets /external:W0)
+        else()
+            target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
+        endif()
+    endif()
+    if(SKIPBUILD_SANITIZE AND NOT MSVC)
+        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endif()
+endfunction()
+
+skipbuild_strict_flags(remake_core)
+skipbuild_strict_flags(skipbuild)
 
 add_test(NAME cache_test COMMAND test_cache)
 add_test(NAME concurrent_test COMMAND test_concurrent)
@@ -73,6 +96,7 @@ add_test(NAME stats_test COMMAND test_stats)
 add_test(NAME pch_test COMMAND test_pch)
 add_test(NAME response_file_test COMMAND test_response_file)
 add_test(NAME init_test COMMAND test_init)
+add_test(NAME key_soundness_test COMMAND test_key_soundness)
 
 # Install targets
 install(TARGETS skipbuild

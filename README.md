@@ -32,7 +32,7 @@ Both installers download the prebuilt binary from GitHub Releases, **verify its 
 ### Confirm
 
 ```powershell
-skipbuild --version      # -> skipbuild 0.2.2
+skipbuild --version      # -> skipbuild 0.3.0
 ```
 
 > **Terminal already open?** Operating systems apply `PATH` changes only to processes started *afterwards*. If `skipbuild` isn't found:
@@ -285,11 +285,14 @@ compile command
 The cache key is a SHA-256 over:
 
 1. **Source file content** — full text of `.cpp`/`.c`/`.cc`
-2. **Normalized include paths** — `-I`/`/I` resolved to build root, forward slashes, case-folded on Windows
-3. **Sorted compiler flags** — all flags except output/file args, sorted for determinism
-4. **Compiler fingerprint** — see [Compiler Fingerprinting](#-compiler-fingerprinting--cache-invalidation) below
-5. **Compiler type + version** — e.g., `MSVC 19.51.36260`, `GCC 13.3`
-6. **Relevant environment** — `SKIPBUILD_*`
+2. **Included header content** — SHA-256 of every transitively-included header (discovered via `cl /showIncludes` or `cc -MM`), so editing any header invalidates the entry
+3. **Normalized include paths** — `-I`/`/I` resolved to build root, forward slashes, case-folded on Windows
+4. **Compiler flags** — every flag (`-D`/`/D`, `-U`/`/U`, `/std:`, `/MD`/`/MT`, `-f*`, `-m*`, `-pthread`, …), sorted for determinism; output-only paths (`-o`, `/Fo`, `/Fd`, `/Fe`, `/Fp`, …) are excluded
+5. **Compiler fingerprint** — see [Compiler Fingerprinting](#-compiler-fingerprinting--cache-invalidation) below
+6. **Compiler type + version** — e.g., `MSVC 19.51.36260`, `GCC 13.3`
+7. **Relevant environment** — `SKIPBUILD_*`
+
+> If the dependency set cannot be determined (e.g., the compiler could not be run in preprocess mode), skipbuild **bypasses the cache** for that file rather than risk a stale hit.
 
 ### 🔏 Compiler Fingerprinting & Cache Invalidation
 
@@ -360,6 +363,7 @@ export SKIPBUILD_COMPILER_CHECK=content
 | Remote max retries | — | `SKIPBUILD_REMOTE_MAX_RETRIES` | `remote_max_retries` | `1` |
 | Remote auth header | — | `SKIPBUILD_REMOTE_AUTH_HEADER` | `remote_auth_header` | — |
 | Remote verify SSL | — | `SKIPBUILD_REMOTE_VERIFY_SSL` | `remote_verify_ssl` | `true` |
+| Allow insecure auth transport | — | `SKIPBUILD_REMOTE_ALLOW_INSECURE` | — | `false` |
 | Compiler fingerprint | `--compiler-check <mode>` | `SKIPBUILD_COMPILER_CHECK` | `compiler_check` | `mtime` |
 | Disable cache | — | `SKIPBUILD_DISABLE=1` | — | `false` |
 | Log level | — | `REMAKE_LOG=debug\|info\|warn\|error\|none` | — | `none` |
@@ -414,7 +418,7 @@ Options:
 | `--clean` | Removes all cache entries (`rm -rf ~/.cache/skipbuild`) |
 
 **Cache directory:** `~/.cache/skipbuild` (Windows: `%USERPROFILE%\.cache\skipbuild`)  
-**Size limit:** 5 GB default, 85% target, LRU + max-age (30 days) eviction
+**Size limit:** 5 GB default, 85% target, LRU + max-age (30 days) eviction. Eviction runs automatically after a store, throttled to at most once every 5 minutes (tracked by a `.last_cleanup` marker in the cache root).
 
 ---
 
@@ -606,7 +610,8 @@ $env:REMAKE_LOG = "debug"
 **Security:**
 - Cache stores: compiler output (`.obj`/`.o`), debug sidecars (`.pdb`, `.idb`, `.dwo`), metadata (key, toolchain hash, timestamps). No source code.
 - Disk: zstd level 3 compressed blobs in `~/.cache/skipbuild/aa/bb/<hash>/` with `meta.json`
-- Remote auth: Header-based (`SKIPBUILD_REMOTE_AUTH_HEADER`) — do not expose to untrusted networks without TLS
+- Remote auth: Header-based (`SKIPBUILD_REMOTE_AUTH_HEADER`). Credentials are **never sent over an unencrypted transport** — plaintext `http://` (and all non-Windows builds, which have no TLS client) drop the auth header unless you explicitly set `SKIPBUILD_REMOTE_ALLOW_INSECURE=1`.
+- Remote artifacts: names from the remote are sanitised to a bare filename before writing (no path traversal), and zstd blobs are decompressed with a streaming, size-bounded reader (no decompression bombs).
 - Reporting: See [SECURITY.md](SECURITY.md)
 
 **Testing:**

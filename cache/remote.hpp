@@ -19,6 +19,7 @@ public:
         int max_retries = 1;                // Max retry attempts
         std::string auth_header;            // Optional Authorization header
         bool verify_ssl = true;             // SSL verification (for HTTPS)
+        bool allow_insecure = false;        // Allow sending auth over plaintext HTTP
     };
 
     struct RemoteStats {

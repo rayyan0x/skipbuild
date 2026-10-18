@@ -55,6 +55,24 @@ static bool write_file(const fs::path& path, const std::vector<uint8_t>& data) {
     return f.good();
 }
 
+// Reduce a remote-supplied artifact name to a bare filename so that a hostile
+// or compromised remote (or a MITM on plaintext HTTP) cannot write outside the
+// cache entry directory via "../" or absolute paths.
+static std::optional<std::string> sanitize_remote_name(const std::string& name) {
+    if (name.empty()) return std::nullopt;
+    fs::path p(name);
+    if (p.has_root_name() || p.has_root_directory()) return std::nullopt;
+    std::string fname = p.filename().string();
+    if (fname.empty() || fname == "." || fname == "..") return std::nullopt;
+    // Reject any remaining drive/colon or separator characters.
+    if (fname.find(':') != std::string::npos ||
+        fname.find('/') != std::string::npos ||
+        fname.find('\\') != std::string::npos) {
+        return std::nullopt;
+    }
+    return fname;
+}
+
 static bool compress_data(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
 #if REMAKE_HAVE_ZSTD
     size_t max_compressed = ZSTD_compressBound(input.size());
@@ -69,21 +87,44 @@ static bool compress_data(const std::vector<uint8_t>& input, std::vector<uint8_t
 #endif
 }
 
-static bool decompress_data(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
+// Streaming ZSTD decompression with a hard output cap. Never trusts the
+// frame header's declared content size (an attacker-controlled frame could
+// claim an enormous size and exhaust memory), and bounds the total output to
+// guard against decompression bombs.
+static bool decompress_zstd_bounded(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
 #if REMAKE_HAVE_ZSTD
-    size_t decompressed_size = ZSTD_getFrameContentSize(input.data(), input.size());
-    if (decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN || decompressed_size == ZSTD_CONTENTSIZE_ERROR) {
-        decompressed_size = input.size() * 10;
+    static constexpr size_t kMaxOutputBytes = static_cast<size_t>(4) * 1024 * 1024 * 1024; // 4 GiB
+    if (input.empty()) return false;
+
+    ZSTD_DStream* ds = ZSTD_createDStream();
+    if (!ds) return false;
+    ZSTD_initDStream(ds);
+
+    output.clear();
+    std::vector<char> outbuf(ZSTD_DStreamOutSize());
+    ZSTD_inBuffer in{ input.data(), input.size(), 0 };
+
+    bool ok = false;
+    while (true) {
+        ZSTD_outBuffer out{ outbuf.data(), outbuf.size(), 0 };
+        size_t ret = ZSTD_decompressStream(ds, &out, &in);
+        if (ZSTD_isError(ret)) break;
+        if (output.size() + out.pos > kMaxOutputBytes) break;
+        output.insert(output.end(), outbuf.data(), outbuf.data() + out.pos);
+        if (ret == 0) { ok = true; break; }                        // frame fully decoded
+        if (out.pos == 0 && in.pos >= in.size) { ok = true; break; } // input exhausted
     }
-    output.resize(decompressed_size);
-    size_t decompressed = ZSTD_decompress(output.data(), output.size(), input.data(), input.size());
-    if (ZSTD_isError(decompressed)) return false;
-    output.resize(decompressed);
-    return true;
+
+    ZSTD_freeDStream(ds);
+    return ok;
 #else
     output = input;
     return true;
 #endif
+}
+
+static bool decompress_data(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
+    return decompress_zstd_bounded(input, output);
 }
 
 // --- File Lock Implementation ---
@@ -405,21 +446,7 @@ static bool compress_buffer(const std::vector<uint8_t>& input, std::vector<uint8
 }
 
 static bool decompress_buffer(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
-    // Get decompressed size from frame header
-    size_t decompressed_size = ZSTD_getFrameContentSize(input.data(), input.size());
-    if (decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN || decompressed_size == ZSTD_CONTENTSIZE_ERROR) {
-        // Fallback: try to decompress with a reasonable upper bound
-        decompressed_size = input.size() * 10; // Assume max 10x compression ratio
-    }
-    
-    output.resize(decompressed_size);
-    
-    size_t decompressed = ZSTD_decompress(output.data(), output.size(), input.data(), input.size());
-    if (ZSTD_isError(decompressed)) {
-        return false;
-    }
-    output.resize(decompressed);
-    return true;
+    return decompress_zstd_bounded(input, output);
 }
 
 static bool compress_file(const std::filesystem::path& input_path, const std::filesystem::path& output_path, int level = 3) {
@@ -633,20 +660,39 @@ CacheKey Cache::compute_key_from_command(const CompileCommand& cmd) {
     auto base_key = compute_key(cmd.source, norm_includes, norm_flags, cmd.compiler_hash, 
                                 detect_compiler(cmd.compiler_path).type);
     
+    std::ostringstream extra;
+    extra << base_key.hash;
+    
+    // Header dependencies: fold the *content* of every transitively-included
+    // file into the key so that editing any header (including nested includes)
+    // invalidates the entry. Only content hashes are used (not paths) so the
+    // key stays machine-independent across different SDK/install locations.
+    if (!cmd.dependencies.empty()) {
+        std::vector<std::string> dep_hashes;
+        dep_hashes.reserve(cmd.dependencies.size());
+        for (const auto& dep : cmd.dependencies) {
+            std::string h = compute_file_hash(dep);
+            if (!h.empty()) dep_hashes.push_back(h);
+        }
+        std::sort(dep_hashes.begin(), dep_hashes.end());
+        dep_hashes.erase(std::unique(dep_hashes.begin(), dep_hashes.end()), dep_hashes.end());
+        for (const auto& h : dep_hashes) {
+            extra << "|dep:" << h;
+        }
+    }
+    
     // Include PCH source content hash in the key if using PCH
     if (cmd.pch.mode != PCHMode::None && !cmd.pch.pch_source.empty() && fs::exists(cmd.pch.pch_source)) {
         std::string pch_hash = compute_file_hash(cmd.pch.pch_source);
         if (!pch_hash.empty()) {
-            std::ostringstream oss;
-            oss << base_key.hash << "|pch:" << pch_hash;
-            CacheKey pch_key;
-            pch_key.hash = compute_sha256(oss.str());
-            pch_key.toolchain_id = base_key.toolchain_id;
-            return pch_key;
+            extra << "|pch:" << pch_hash;
         }
     }
     
-    return base_key;
+    CacheKey key;
+    key.hash = compute_sha256(extra.str());
+    key.toolchain_id = base_key.toolchain_id;
+    return key;
 }
 
 // Generate unique temporary file path
@@ -843,16 +889,21 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key) const {
                         
                         // Decompress and save sidecars
                         for (const auto& [name, compressed_data] : remote_result.sidecars) {
+                            auto safe_name = sanitize_remote_name(name);
+                            if (!safe_name) {
+                                std::cerr << "[build-cache warning] Ignoring remote sidecar with unsafe name: " << name << "\n";
+                                continue;
+                            }
                             std::vector<uint8_t> decompressed;
                             if (decompress_data(compressed_data, decompressed)) {
-                                fs::path sidecar_path = key_dir / name;
+                                fs::path sidecar_path = key_dir / *safe_name;
                                 if (write_file(sidecar_path, decompressed)) {
                                     SidecarInfo si;
                                     si.relative_path = sidecar_path.filename();
                                     si.hash = compute_sha256(decompressed);
                                     
                                     // Determine sidecar type from extension
-                                    std::string ext = name;
+                                    std::string ext = *safe_name;
                                     if (ext.size() > 4 && ext.substr(ext.size() - 4) == ".zst") {
                                         ext = ext.substr(0, ext.size() - 4);
                                     }
@@ -1106,8 +1157,6 @@ void Cache::update_access_time(const std::string& hash) const {
     std::filesystem::path meta_file = key_dir / "meta.json";
     if (std::filesystem::exists(meta_file)) {
         std::error_code ec;
-        auto now = std::chrono::system_clock::now();
-        auto tt = std::chrono::system_clock::to_time_t(now);
         std::filesystem::last_write_time(meta_file, std::filesystem::file_time_type::clock::now(), ec);
     }
 }
@@ -1478,7 +1527,7 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
     std::vector<std::string> expanded_argv;
     try {
         expanded_argv = expand_response_files(argc, argv);
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         // Response file parsing error (e.g., recursion depth exceeded, malformed file)
         return std::nullopt;
     } catch (...) {
@@ -1507,6 +1556,31 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
             cmd.includes.push_back(expanded_argv[++i]);
             cmd.args.push_back(arg);
             cmd.args.push_back(expanded_argv[i]);
+        } else if ((arg == "-isystem" || arg == "-iquote" || arg == "-idirafter" || arg == "-isysroot") && i + 1 < expanded_argc) {
+            // GCC/Clang system/quoted include directories: affect header lookup
+            cmd.includes.push_back(expanded_argv[++i]);
+            cmd.args.push_back(arg);
+            cmd.args.push_back(expanded_argv[i]);
+            cmd.flags.push_back(arg);
+        } else if (((arg.rfind("-D", 0) == 0 || arg.rfind("-U", 0) == 0) && arg.size() > 2) ||
+                   ((arg.rfind("/D", 0) == 0 || arg.rfind("/U", 0) == 0) && arg.size() > 2 && arg.rfind("/DEFAULTLIB:", 0) != 0)) {
+            // Preprocessor defines/undefines in attached form (e.g. -DFOO=1, /DWIN32)
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+        } else if ((arg == "-D" || arg == "-U" || arg == "/D" || arg == "/U") && i + 1 < expanded_argc) {
+            // Preprocessor defines/undefines in separate form
+            cmd.flags.push_back(arg);
+            cmd.args.push_back(arg);
+            cmd.flags.push_back(expanded_argv[i + 1]);
+            cmd.args.push_back(expanded_argv[++i]);
+        } else if (arg.rfind("/Fd", 0) == 0 || arg.rfind("/Fe", 0) == 0 || arg.rfind("/Fm", 0) == 0 ||
+                   arg.rfind("/FR", 0) == 0 || arg.rfind("/Fa", 0) == 0 || arg.rfind("/Fi", 0) == 0) {
+            // MSVC output/side-effect paths (PDB, exe, map, browse, listing, preprocessed):
+            // passed through, but excluded from the key so it stays machine-independent.
+            cmd.args.push_back(arg);
+            if (arg.size() == 3 && i + 1 < expanded_argc) {
+                cmd.args.push_back(expanded_argv[++i]);
+            }
         } else if (arg.rfind("-std=", 0) == 0 || arg.rfind("-O", 0) == 0 || arg.rfind("-g", 0) == 0 || arg.rfind("-Wall", 0) == 0 || arg.rfind("-W", 0) == 0) {
             cmd.flags.push_back(arg);
             cmd.args.push_back(arg);
@@ -1599,6 +1673,13 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
             cmd.source = arg;
             cmd.args.push_back(arg);
         } else {
+            // Any other flag the parser did not specifically recognise must still
+            // participate in the cache key, otherwise flags such as /std:c++NN,
+            // /EHsc, /MD, /MT, -fPIC, -m64, -pthread ... would be ignored and
+            // could produce a wrong cache hit.
+            if (!arg.empty() && (arg[0] == '-' || (arg[0] == '/' && arg.size() > 1))) {
+                cmd.flags.push_back(arg);
+            }
             cmd.args.push_back(arg);
         }
     }
@@ -1677,6 +1758,7 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
 }
 
 PCHInfo detect_pch_mode(const CompileCommand& cmd, CompilerType type) {
+    (void)type;
     PCHInfo pch_info;
     pch_info.mode = cmd.pch.mode;
     pch_info.pch_source = cmd.pch.pch_source;
@@ -1702,11 +1784,6 @@ CacheKey compute_pch_key(const CompileCommand& cmd) {
     // This is used when the PCH itself is the primary output (Create mode)
     auto info = detect_compiler(cmd.compiler_path);
     return Cache::compute_key(cmd.pch.pch_source, cmd.includes, cmd.flags, cmd.compiler_hash, info.type);
-}
-
-std::vector<std::string> get_dependencies(char** argv, int argc) {
-    std::vector<std::string> deps;
-    return deps;
 }
 
 LinkerType detect_linker_type(const std::string& linker_path) {
@@ -1847,7 +1924,7 @@ static std::string get_compiler_version_output(const std::string& compiler_path)
     std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(version_cmd.c_str(), "r"), pclose);
     #endif
     if (pipe) {
-        while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+        while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe.get()) != nullptr) {
             version_output += buffer.data();
         }
     }
@@ -2175,7 +2252,7 @@ static std::wstring to_wide(const std::string& s) {
 }
 
 // Simple SHA256 using Windows CryptoAPI
-static std::string compute_sha256_winhttp(const std::vector<uint8_t>& data) {
+[[maybe_unused]] static std::string compute_sha256_winhttp(const std::vector<uint8_t>& data) {
     HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
     std::string result;
@@ -2274,12 +2351,12 @@ public:
         
         if (!auth_header_.empty()) {
             std::wstring wauth = to_wide(auth_header_);
-            WinHttpAddRequestHeaders(request, wauth.c_str(), -1, WINHTTP_ADDREQ_FLAG_ADD);
+            WinHttpAddRequestHeaders(request, wauth.c_str(), static_cast<DWORD>(-1), WINHTTP_ADDREQ_FLAG_ADD);
         }
         
         if (!content_type.empty()) {
             std::wstring wct = to_wide("Content-Type: " + content_type);
-            WinHttpAddRequestHeaders(request, wct.c_str(), -1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+            WinHttpAddRequestHeaders(request, wct.c_str(), static_cast<DWORD>(-1), WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
         }
         
         const char* body_ptr = body ? reinterpret_cast<const char*>(body->data()) : nullptr;
@@ -2595,6 +2672,31 @@ struct RemoteCache::Impl {
     
     Impl(Config config, fs::path local_cache)
         : config_(std::move(config)), local_cache_(std::move(local_cache)) {
+        // Never transmit credentials over a transport that is not actually
+        // encrypted. On Windows that means plaintext HTTP; on POSIX the raw
+        // socket client has no TLS at all, so every request is plaintext.
+        if (!config_.url.empty() && !config_.auth_header.empty()) {
+            auto parsed = parse_url(config_.url);
+            bool transport_secure = false;
+#ifdef _WIN32
+            transport_secure = parsed.has_value() && parsed->is_ssl;
+#else
+            (void)parsed;
+            transport_secure = false;
+#endif
+            if (!transport_secure) {
+                if (!config_.allow_insecure) {
+                    std::cerr << "[build-cache warning] Remote cache transport is not encrypted "
+                                 "(plaintext HTTP, or no TLS support on this platform); "
+                                 "refusing to send the auth header. Use https:// on Windows, or set "
+                                 "SKIPBUILD_REMOTE_ALLOW_INSECURE=1 to override.\n";
+                    config_.auth_header.clear();
+                } else {
+                    std::cerr << "[build-cache warning] Sending the auth header over an unencrypted "
+                                 "transport (allowed by SKIPBUILD_REMOTE_ALLOW_INSECURE).\n";
+                }
+            }
+        }
 #ifdef _WIN32
         client_ = std::make_unique<WinHttpClient>(
             config_.connect_timeout_ms,
@@ -2873,6 +2975,12 @@ RemoteCache::Config RemoteCache::from_env() {
         std::string v = env;
         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
         config.verify_ssl = (v == "1" || v == "true" || v == "yes" || v == "on");
+    }
+    
+    if (const char* env = get_env("SKIPBUILD_REMOTE_ALLOW_INSECURE", "BUILDCACHE_REMOTE_ALLOW_INSECURE")) {
+        std::string v = env;
+        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        config.allow_insecure = (v == "1" || v == "true" || v == "yes" || v == "on");
     }
     
     return config;

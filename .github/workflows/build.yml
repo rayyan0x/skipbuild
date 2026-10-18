@@ -52,6 +52,112 @@ jobs:
           name: skipbuild-${{ matrix.name || runner.os }}-${{ runner.arch }}
           path: build/skipbuild
 
+  # Verifies the advertised CMAKE_*_COMPILER_LAUNCHER workflow actually works
+  # end to end with Ninja (the Visual Studio generator ignores the launcher, and
+  # the default generator in the matrix job is not Ninja).
+  launcher-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (Ninja)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Launcher smoke test (miss -> hit -> header edit invalidates)
+        run: |
+          set -euo pipefail
+          bin="$PWD/build/skipbuild"
+          tmp="$(mktemp -d)"
+          cd "$tmp"
+          printf '#define VAL 1\n' > h.h
+          printf '#include "h.h"\nint f(){return VAL;}\n' > a.cpp
+          export SKIPBUILD_DIR="$tmp/cache"
+          run() { "$bin" -- "${CXX:-c++}" -c -I "$tmp" a.cpp -o a.o 2>&1; }
+          first="$(run)"; echo "$first"
+          if echo "$first" | grep -q "HIT"; then echo "FAIL: expected MISS on first run"; exit 1; fi
+          if ! run | grep -q "HIT"; then echo "FAIL: expected HIT on second run"; exit 1; fi
+          printf '#define VAL 2\n' > h.h
+          if run | grep -q "HIT"; then echo "FAIL: header edit did not invalidate the cache"; exit 1; fi
+          echo "launcher smoke test passed"
+
+  # Windows/Ninja/MSVC variant: the Visual Studio generator ignores the
+  # launcher, so we need Ninja + a real MSVC environment to exercise the
+  # cl.exe (/showIncludes) dependency-discovery path end to end.
+  launcher-smoke-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (Ninja)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Launcher smoke test (miss -> hit -> header edit invalidates)
+        shell: pwsh
+        run: |
+          $bin = Join-Path $PWD "build\skipbuild.exe"
+          if (-not (Test-Path $bin)) { throw "skipbuild.exe not found at $bin" }
+          $cl = (Get-Command cl.exe).Source
+          $tmp = (New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP "sb_smoke")).FullName
+          Set-Content -Path (Join-Path $tmp "h.h") -Value "#define VAL 1"
+          Set-Content -Path (Join-Path $tmp "a.cpp") -Value "#include ""h.h""`nint f(){return VAL;}"
+          $env:SKIPBUILD_DIR = Join-Path $env:RUNNER_TEMP "sb_smoke_cache"
+          function Invoke-Cc {
+            $src = Join-Path $tmp "a.cpp"
+            $obj = Join-Path $tmp "a.obj"
+            & $bin -- $cl /nologo /c /I $tmp $src "/Fo$obj" 2>&1 | Out-String
+          }
+          $first = Invoke-Cc
+          Write-Host $first
+          if ($first -match "HIT") { throw "expected MISS on first run" }
+          if (-not ((Invoke-Cc) -match "HIT")) { throw "expected HIT on second run" }
+          Set-Content -Path (Join-Path $tmp "h.h") -Value "#define VAL 2"
+          if ((Invoke-Cc) -match "HIT") { throw "header edit did not invalidate the cache" }
+          Write-Host "windows launcher smoke test passed"
+
+  # Warnings-as-errors build (/W4 /WX on MSVC, -Wall -Wextra -Werror elsewhere).
+  strict:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (warnings as errors)
+        run: cmake -S . -B build -DSKIPBUILD_WERROR=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+  # AddressSanitizer + UBSan on Linux. Non-blocking until the suite is verified
+  # clean under the sanitizers, but results are surfaced for inspection.
+  sanitizers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (ASan + UBSan)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DSKIPBUILD_SANITIZE=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 300
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build

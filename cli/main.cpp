@@ -11,28 +11,24 @@
 #include <algorithm>
 #include <iomanip>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 
+static int spawn_argv(const std::vector<std::string>& args);
+
 // Execute native compiler with full passthrough (fallback)
-// This is a simplified version - in practice uses the one from core
 int execute_native_fallback(const std::vector<std::string>& args, const std::string& compiler_path = "") {
     std::vector<std::string> full_args = args;
-    if (!compiler_path.empty()) {
+    if (!compiler_path.empty() && !full_args.empty()) {
         full_args[0] = compiler_path;
     }
-    
-    std::string cmdline;
-    for (size_t i = 0; i < full_args.size(); ++i) {
-        if (i > 0) cmdline += " ";
-        if (full_args[i].find(' ') != std::string::npos || full_args[i].find('"') != std::string::npos) {
-            cmdline += "\"" + full_args[i] + "\"";
-        } else {
-            cmdline += full_args[i];
-        }
-    }
-    
-    // Execute and pass through stdout/stderr directly
-    return std::system(cmdline.c_str());
+    return spawn_argv(full_args);
 }
 
 void print_usage(const char* prog) {
@@ -115,19 +111,93 @@ std::string find_compiler_in_path(const std::string& compiler) {
     return compiler;
 }
 
-int run_compiler(const std::vector<std::string>& args) {
-    // Use system() which handles argument parsing properly on all platforms
+// Replay the compiler with an argv-preserving spawn.
+// std::system() re-parses the command through cmd.exe/sh and mangles arguments
+// such as quoted defines (-DFOO="bar"), so spawn directly and pass the argument
+// vector through unchanged.
+#ifdef _WIN32
+// Quote one argument exactly the way the MSVC CRT will un-quote it, so embedded
+// quotes (\") survive the round-trip to the child process.
+static void append_windows_arg(std::string& out, const std::string& arg) {
+    if (arg.empty() || arg.find_first_of(" \t\"") != std::string::npos) {
+        out += '"';
+        size_t backslashes = 0;
+        for (char c : arg) {
+            if (c == '\\') {
+                ++backslashes;
+            } else if (c == '"') {
+                out.append(backslashes * 2 + 1, '\\');
+                out += '"';
+                backslashes = 0;
+            } else {
+                out.append(backslashes, '\\');
+                backslashes = 0;
+                out += c;
+            }
+        }
+        out.append(backslashes * 2, '\\');
+        out += '"';
+    } else {
+        out += arg;
+    }
+}
+#endif
+
+static int spawn_argv(const std::vector<std::string>& args) {
+    if (args.empty()) return 127;
+
+#ifdef _WIN32
+    std::string prog = args[0];
+    if (prog.find('/') == std::string::npos && prog.find('\\') == std::string::npos) {
+        prog = find_compiler_in_path(prog);
+    }
+
     std::string cmdline;
     for (size_t i = 0; i < args.size(); ++i) {
-        if (i > 0) cmdline += " ";
-        // Quote args that contain spaces
-        if (args[i].find(' ') != std::string::npos || args[i].find('"') != std::string::npos) {
-            cmdline += "\"" + args[i] + "\"";
-        } else {
-            cmdline += args[i];
-        }
+        if (i) cmdline += ' ';
+        append_windows_arg(cmdline, args[i]);
     }
-    return std::system(cmdline.c_str());
+
+    std::vector<char> buf(cmdline.begin(), cmdline.end());
+    buf.push_back('\0');
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessA(prog.c_str(), buf.data(), nullptr, nullptr, TRUE,
+                        0, nullptr, nullptr, &si, &pi)) {
+        return 127;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 127;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return static_cast<int>(code);
+#else
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& a : args) {
+        argv.push_back(const_cast<char*>(a.c_str()));
+    }
+    argv.push_back(nullptr);
+
+    pid_t pid = fork();
+    if (pid < 0) return 127;
+    if (pid == 0) {
+        execvp(argv[0], argv.data());
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return 127;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 127;
+#endif
+}
+
+int run_compiler(const std::vector<std::string>& args) {
+    return spawn_argv(args);
 }
 
 int main(int argc, char* argv[]) {

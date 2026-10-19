@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The parser now accepts the attached MSVC PCH forms (`/Yc"pch.h"`, `/Yupch.h`, `/Ycpch.h`) and treats a header passed to `-x c++-header` as the input file; GCC/Clang PCH outputs follow the `<header>.gch` convention (appending `.gch`) and an explicit `-o` is honoured.
   - A cache miss is recorded once, not twice (`Cache::get()` and `Cache::safe_get()` were both counting it), so `--stats` miss counts are correct.
   - Zero-byte object files are no longer stored, so an empty/failed compile output cannot poison a cache key.
+- `normalize_path_for_key()` now only canonicalizes absolute paths. `weakly_canonical()` resolves a relative path against the current working directory on some platforms (e.g. macOS libc++), which baked a machine-specific absolute path into the cache key; relative paths are kept relative so keys stay portable.
 - Test fixtures were corrected where the *test* (not the code) was wrong: the response-file BOM case wrote too few bytes, the sidecar test assumed an uncompressed cache layout, and the eviction test used a hard-coded byte budget that didn't match the compressed entry sizes (and measured the cache size only after a `get()` had already decompressed blobs back into the entry directory).
 
 ## [0.3.0] - 2026-10-18

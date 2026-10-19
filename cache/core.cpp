@@ -2020,7 +2020,14 @@ std::string get_linker_hash(const std::string& linker_path) {
 
 // Normalize path for cache key: strip build root prefix, normalize separators, case
 std::string normalize_path_for_key(const std::filesystem::path& path, const std::filesystem::path& build_root) {
-    std::filesystem::path normalized = std::filesystem::weakly_canonical(path);
+    // Only canonicalize absolute paths. weakly_canonical() resolves a relative
+    // path against the current working directory on some platforms (e.g. macOS
+    // libc++), which would bake a machine/CWD-specific absolute path into the
+    // key. Relative paths are kept relative and merely lexically normalized so
+    // keys stay portable.
+    std::filesystem::path normalized = path.is_absolute()
+        ? std::filesystem::weakly_canonical(path)
+        : path.lexically_normal();
     std::string path_str = normalized.string();
     
     // Normalize path separators to forward slash

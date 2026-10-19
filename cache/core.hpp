@@ -104,6 +104,10 @@ struct CacheEntry {
     CacheKey key;
     std::vector<std::filesystem::path> outputs;  // Primary outputs (.obj, .o)
     std::vector<SidecarInfo> sidecars;           // Debug/sidecar files (.pdb, .dwo, etc.)
+    // Decompressed copies materialised inside the entry directory by get().
+    // They are regenerable from the stored .zst blobs, so the caller may delete
+    // them once the outputs have been copied out (see Cache::release).
+    std::vector<std::filesystem::path> transient_files;
     int64_t timestamp;
     int64_t size_bytes;
 };
@@ -232,6 +236,11 @@ std::optional<CacheEntry> get(const CacheKey& key) const;
                   const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars = {});
 
     void prune(int64_t max_size_bytes = -1, int max_age_days = -1);
+
+    // Delete the ephemeral decompressed copies referenced by an entry that was
+    // returned by get(). The compressed .zst blobs remain, so the entry is
+    // still served on the next read. Safe to call more than once.
+    void release(const CacheEntry& entry) const;
     
     struct Stats {
         int64_t entries = 0;

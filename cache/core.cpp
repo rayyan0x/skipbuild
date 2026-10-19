@@ -157,7 +157,7 @@ struct FileLock::Impl {
         // - Shared (read): dwFlags = 0
         // - Exclusive (write): dwFlags = LOCKFILE_EXCLUSIVE_LOCK
         DWORD lock_flags = (type == FileLock::LockType::Shared) ? 0 : LOCKFILE_EXCLUSIVE_LOCK;
-        DWORD share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;  // Allow concurrent opens
+        DWORD share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;  // allow delete while locked
         
         auto start = std::chrono::steady_clock::now();
         int attempt = 0;
@@ -221,7 +221,7 @@ struct FileLock::Impl {
         lock_type_ = type;
         
         DWORD lock_flags = (type == FileLock::LockType::Shared) ? 0 : LOCKFILE_EXCLUSIVE_LOCK;
-        DWORD share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+        DWORD share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         
         std::error_code ec;
         std::filesystem::create_directories(lock_path_.parent_path(), ec);
@@ -836,7 +836,24 @@ bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& o
     if (success) {
         stats_tracker_->update_cache_size(1, total_size, max_cache_size);
     }
-    
+
+    // Auto-clear: once the cache reaches auto_clear_ratio of the configured
+    // limit, purge everything (free the space back to zero) rather than waiting
+    // for the periodic prune. <= 0 disables the behaviour.
+    if (success && config_.max_cache_size_bytes > 0 && config_.auto_clear_ratio > 0.0) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        auto entries = collect_entries();
+        int64_t usage = 0;
+        for (const auto& e : entries) usage += e.size_bytes;
+        int64_t trigger = static_cast<int64_t>(config_.max_cache_size_bytes * config_.auto_clear_ratio);
+        if (usage >= trigger) {
+            for (const auto& e : entries) {
+                purge_corrupted_entry(e);
+            }
+            stats_tracker_->update_cache_size(0, 0, max_cache_size);
+        }
+    }
+
     return success;
 }
 
@@ -1062,6 +1079,9 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                                     has_corrupted = true;
                                     break;
                                 }
+                                // Record it so the caller can delete the
+                                // (regenerable) decompressed copy after use.
+                                entry.transient_files.push_back(dest_path);
                                 
                                 // Check if it's a sidecar file
                                 std::string stem_ext = dest_path.extension().string();
@@ -1168,6 +1188,21 @@ void Cache::update_access_time(const std::string& hash) const {
     }
 }
 
+void Cache::release(const CacheEntry& entry) const {
+    for (const auto& path : entry.transient_files) {
+        std::error_code ec;
+        // Only remove a decompressed copy when the compressed blob it was
+        // produced from is still present (i.e. it is regenerable). A plain
+        // (legacy, uncompressed) cache file has no ".zst" sibling and is left
+        // untouched.
+        std::filesystem::path blob = path;
+        blob += ".zst";
+        if (std::filesystem::exists(blob, ec)) {
+            std::filesystem::remove(path, ec);
+        }
+    }
+}
+
 std::vector<Cache::EntryMeta> Cache::collect_entries() const {
     std::vector<EntryMeta> entries;
     std::error_code ec;
@@ -1185,9 +1220,17 @@ std::vector<Cache::EntryMeta> Cache::collect_entries() const {
                     meta.size_bytes = 0;
                     meta.last_access = meta.timestamp;
                     for (auto& f : std::filesystem::directory_iterator(d3.path(), ec)) {
-                        if (f.path().filename() != "meta.json" && f.path().filename() != ".lock") {
-                            meta.size_bytes += std::filesystem::file_size(f.path(), ec);
+                        auto name = f.path().filename();
+                        if (name == "meta.json" || name == ".lock") continue;
+                        // Skip a decompressed copy that duplicates a compressed
+                        // blob already in this entry, so the on-disk accounting
+                        // reflects the stored (compressed) size.
+                        if (f.path().extension() != ".zst") {
+                            std::filesystem::path twin = f.path();
+                            twin += ".zst";
+                            if (std::filesystem::exists(twin)) continue;
                         }
+                        meta.size_bytes += std::filesystem::file_size(f.path(), ec);
                     }
                     entries.push_back(std::move(meta));
                 }

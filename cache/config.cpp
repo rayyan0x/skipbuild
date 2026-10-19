@@ -144,6 +144,10 @@ void ConfigParser::apply_values(CacheConfig& config, const std::map<std::string,
             try {
                 config.eviction_target_ratio = std::stod(value);
             } catch (...) {}
+        } else if (lower_key == "auto_clear_ratio" || lower_key == "auto_clear") {
+            try {
+                config.auto_clear_ratio = std::stod(value);
+            } catch (...) {}
         } else if (lower_key == "cache_dir" || lower_key == "cache_directory") {
             config.cache_dir = value;
         } else if (lower_key == "compression_enabled" || lower_key == "compression") {
@@ -292,6 +296,10 @@ CacheConfig ConfigParser::load_config(
     
     if (const char* env = get_env("SKIPBUILD_EVICTION_RATIO", "BUILDCACHE_EVICTION_RATIO")) {
         try { config.eviction_target_ratio = std::stod(env); } catch (...) {}
+    }
+    
+    if (const char* env = get_env("SKIPBUILD_AUTO_CLEAR_RATIO", "BUILDCACHE_AUTO_CLEAR_RATIO")) {
+        try { config.auto_clear_ratio = std::stod(env); } catch (...) {}
     }
     
     if (const char* env = get_env("SKIPBUILD_COMPRESSION", "BUILDCACHE_COMPRESSION")) {

@@ -90,7 +90,7 @@ function(skipbuild_enable_asserts target)
     endif()
 endfunction()
 
-foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats pch response_file key_soundness)
+foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats pch response_file key_soundness auto_clear)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} remake_core)
     skipbuild_sanitize(test_${t})
@@ -122,6 +122,7 @@ add_test(NAME pch_test COMMAND test_pch)
 add_test(NAME response_file_test COMMAND test_response_file)
 add_test(NAME init_test COMMAND test_init)
 add_test(NAME key_soundness_test COMMAND test_key_soundness)
+add_test(NAME auto_clear_test COMMAND test_auto_clear)
 
 # Install targets
 install(TARGETS skipbuild

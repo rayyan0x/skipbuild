@@ -46,6 +46,7 @@ int main() {
     config.max_cache_size_bytes = 500;  // Small enough to trigger eviction with compressed data
     config.eviction_target_ratio = 0.85;  // Target 85% = 425 bytes
     config.max_age_days = 30;
+    config.auto_clear_ratio = 0.0;  // exercise LRU prune, not the auto-clear-to-zero path
     
     skipbuild::Cache cache(cache_dir, config);
     

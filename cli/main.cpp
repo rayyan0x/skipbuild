@@ -799,7 +799,10 @@ int main(int argc, char* argv[]) {
                 }
                 skipbuild::log_debug("Restored: " + link_cmd->output.string());
             }
-            if (restore_ok) return 0;
+            if (restore_ok) {
+                cache.release(*entry);
+                return 0;
+            }
             // If restore failed, fall through to native execution
             skipbuild::log_debug("Cache restore failed, falling back to native linker");
         }
@@ -931,7 +934,10 @@ int main(int argc, char* argv[]) {
             skipbuild::log_debug("Restored sidecar: " + target.string());
         }
         
-        if (restore_ok) return 0;
+        if (restore_ok) {
+            cache.release(*entry);
+            return 0;
+        }
         // If restore failed, fall through to native execution
         skipbuild::log_debug("Cache restore failed, falling back to native compiler");
     }

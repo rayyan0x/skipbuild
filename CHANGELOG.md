@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Automatic cache clear-to-zero.** Once usage reaches `auto_clear_ratio` (default `0.95`) of `max_cache_size_bytes`, `put()` purges every entry and frees the space back to zero instead of waiting for the throttled LRU prune. Configurable via `auto_clear_ratio`/`auto_clear` in the config file or `SKIPBUILD_AUTO_CLEAR_RATIO`/`BUILDCACHE_AUTO_CLEAR_RATIO`; `<= 0` disables it.
+
 ### Fixed
+- **Cache hits no longer inflate the entry.** `Cache::get()` decompresses stored `.zst` blobs back into the entry directory, and those copies were left behind, roughly doubling an entry's on-disk size on every hit. The decompressed copies are now tracked (`CacheEntry::transient_files`) and deleted via the new `Cache::release()` once the CLI has copied the outputs out, so the compressed blob remains the only stored artifact. Size accounting also skips a decompressed copy that duplicates a `.zst` sibling.
+- On Windows, cache-entry `.lock` files are opened with `FILE_SHARE_DELETE`, so purging an entry (which holds the lock open while calling `remove_all`) can actually delete it; previously `purge_corrupted_entry()` silently left the entry in place.
 - **The test suite now actually asserts.** `assert()` is compiled out when `NDEBUG` is defined, which Release/RelWithDebInfo builds do — so the previous "14/14" CI result validated nothing. Test targets are now built with `NDEBUG` undefined (`/UNDEBUG` on MSVC, `-UNDEBUG` elsewhere), which surfaced and fixed six long-standing latent failures:
   - `get_compiler_hash()` on a non-existent compiler path returns a stable 64-hex SHA-256 instead of a variable-length decimal `std::hash` value, so the fingerprint shape is consistent.
   - The parser now accepts the attached MSVC PCH forms (`/Yc"pch.h"`, `/Yupch.h`, `/Ycpch.h`) and treats a header passed to `-x c++-header` as the input file; GCC/Clang PCH outputs follow the `<header>.gch` convention (appending `.gch`) and an explicit `-o` is honoured.

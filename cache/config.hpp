@@ -22,6 +22,9 @@ struct CacheConfig {
     int64_t max_cache_size_bytes = 5LL * 1024 * 1024 * 1024;  // 5 GB default
     int max_age_days = 30;
     double eviction_target_ratio = 0.85;
+    // When cache usage reaches this fraction of max_cache_size_bytes the entire
+    // cache is purged ("clear to zero"). <= 0 disables the behaviour.
+    double auto_clear_ratio = 0.95;
     std::filesystem::path cache_dir;
     bool compression_enabled = true;
     bool read_only = false;

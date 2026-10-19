@@ -101,6 +101,15 @@ int main() {
     print_cache_contents(cache_dir);
     auto stats = cache.get_stats();
     std::cout << "After put 1: " << stats.entries << " entries, " << stats.total_size << " bytes\n";
+
+    // Measure the on-disk size of a single entry (all three are the same data,
+    // so they compress to the same size). The eviction budget is derived from
+    // this instead of a hard-coded byte count, which made the test depend on
+    // how well zstd happened to compress the fixture.
+    const int64_t entry_size = stats.total_size;
+    // Space the writes so the meta.json mtimes (used as LRU timestamps) are
+    // strictly ordered: key1 oldest, key3 newest.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     
     // Put second entry
     std::cout << "Putting entry 2...\n";
@@ -109,6 +118,8 @@ int main() {
     print_cache_contents(cache_dir);
     stats = cache.get_stats();
     std::cout << "After put 2: " << stats.entries << " entries, " << stats.total_size << " bytes\n";
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     
     // Put third entry - this should trigger eviction (total would be ~1.2 MB > 1 MB limit)
     std::cout << "Putting entry 3 (should trigger eviction)...\n";
@@ -118,12 +129,21 @@ int main() {
     stats = cache.get_stats();
     std::cout << "After put 3: " << stats.entries << " entries, " << stats.total_size << " bytes\n";
     
-    // Call prune to trigger eviction
+    // Call prune with a budget of three entries; the configured 85% target
+    // then requires exactly one (the oldest) entry to be evicted.
+    const int64_t max_size = 3 * entry_size;
     std::cout << "Calling prune()...\n";
-    cache.prune();
+    cache.prune(max_size);
     print_cache_contents(cache_dir);
     stats = cache.get_stats();
     std::cout << "After prune: " << stats.entries << " entries, " << stats.total_size << " bytes\n";
+
+    // Check the size straight after eviction: a later get() decompresses the
+    // cached .zst blobs back into the entry directory, so measuring after the
+    // presence checks below would report the (much larger) decompressed size.
+    int64_t target = static_cast<int64_t>(max_size * config.eviction_target_ratio);
+    assert(stats.total_size <= target && "Cache size should be under eviction target!");
+    std::cout << "Post-eviction cache size: " << stats.total_size << " bytes (target: " << target << ")\n";
     
     // Verify that LRU entry (key1) was evicted
     std::cout << "Checking which entries remain...\n";
@@ -139,12 +159,6 @@ int main() {
     assert(!entry1.has_value() && "LRU entry should have been evicted!");
     assert(entry2.has_value() && "Entry 2 should still be present!");
     assert(entry3.has_value() && "Entry 3 (newest) should still be present!");
-    
-    // Total size should be under target (85% of 500 = 425 bytes)
-    stats = cache.get_stats();
-    int64_t target = static_cast<int64_t>(config.max_cache_size_bytes * config.eviction_target_ratio);
-    assert(stats.total_size <= target && "Cache size should be under eviction target!");
-    std::cout << "Final cache size: " << stats.total_size << " bytes (target: " << target << ")\n";
     
     // Test zero-byte file purging
     std::cout << "\nTesting zero-byte file purging...\n";

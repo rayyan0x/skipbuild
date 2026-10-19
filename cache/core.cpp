@@ -729,6 +729,9 @@ bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& o
         std::vector<std::pair<std::filesystem::path, bool>> stored_outputs; // {path, is_compressed}
         for (const auto& output : outputs) {
             if (!std::filesystem::exists(output)) continue;
+            // A zero-byte object file means the compile failed (or produced
+            // nothing); caching it would poison the key, so skip it.
+            if (std::filesystem::file_size(output, ec) == 0) continue;
             
             std::filesystem::path dest = key_dir / (output.filename().string() + ".zst");
             std::filesystem::path temp_dest = make_temp_path(key_dir, "cache_" + output.filename().string() + ".zst");
@@ -775,6 +778,9 @@ bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& o
         // Store primary outputs (without compression)
         for (const auto& output : outputs) {
             if (!std::filesystem::exists(output)) continue;
+            // A zero-byte object file means the compile failed (or produced
+            // nothing); caching it would poison the key, so skip it.
+            if (std::filesystem::file_size(output, ec) == 0) continue;
             
             std::filesystem::path dest = key_dir / output.filename();
             std::filesystem::path temp_dest = make_temp_path(key_dir, "cache_" + output.filename().string());
@@ -932,7 +938,8 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key) const {
         }
     }
     
-    stats_tracker_->record_miss();
+    // NOTE: Cache::get() above already recorded the hit/miss; do not record a
+    // second miss here or a single lookup is counted twice.
     return std::nullopt;
 }
 
@@ -1612,14 +1619,19 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
                 cmd.expected_sidecars.push_back(dwo_path.string());
                 cmd.expected_sidecar_types.push_back(SidecarType::DWO);
             }
-        } else if (arg == "/Yc" || arg == "/Yu") {
-            // MSVC PCH: /Yc (create), /Yu (use)
+        } else if (arg.rfind("/Yc", 0) == 0 || arg.rfind("/Yu", 0) == 0) {
+            // MSVC PCH: /Yc (create) / Yu (use), optionally with an attached
+            // header name, e.g. /Yc"pch.h", /Ycpch.h or /Yu"stdafx.h".
+            bool create = arg.rfind("/Yc", 0) == 0;
             cmd.flags.push_back(arg);
             cmd.args.push_back(arg);
-            if (arg == "/Yc") {
-                cmd.pch.mode = PCHMode::Create;
-            } else {
-                cmd.pch.mode = PCHMode::Use;
+            cmd.pch.mode = create ? PCHMode::Create : PCHMode::Use;
+            std::string attached = arg.substr(3);
+            if (attached.size() >= 2 && attached.front() == '"' && attached.back() == '"') {
+                attached = attached.substr(1, attached.size() - 2);
+            }
+            if (!attached.empty()) {
+                cmd.pch.pch_source = attached;
             }
         } else if (arg.rfind("/Fp", 0) == 0) {
             // MSVC PCH output/input file: /Fp<path> or /Fp <path>
@@ -1672,6 +1684,16 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
         } else if (std::filesystem::path(arg).extension() == ".cpp" || std::filesystem::path(arg).extension() == ".cc" || std::filesystem::path(arg).extension() == ".cxx" || std::filesystem::path(arg).extension() == ".c") {
             cmd.source = arg;
             cmd.args.push_back(arg);
+        } else if (cmd.pch.mode == PCHMode::Create &&
+                   (std::filesystem::path(arg).extension() == ".h" ||
+                    std::filesystem::path(arg).extension() == ".hpp" ||
+                    std::filesystem::path(arg).extension() == ".hh" ||
+                    std::filesystem::path(arg).extension() == ".hxx" ||
+                    std::filesystem::path(arg).extension() == ".h++")) {
+            // GCC/Clang: with -x c++-header the header itself is the input file
+            // being precompiled, so treat it as the source.
+            cmd.source = arg;
+            cmd.args.push_back(arg);
         } else {
             // Any other flag the parser did not specifically recognise must still
             // participate in the cache key, otherwise flags such as /std:c++NN,
@@ -1709,10 +1731,13 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
             // For MSVC /Yc, PCH source is typically a header like stdafx.h or pch.h
             // We'll infer it from the source if not set, but ideally user specifies via /Yc"header.h"
         } else if (info.type == CompilerType::GCC || info.type == CompilerType::Clang) {
-            // GCC/Clang default PCH output: <source_name>.gch
-            if (cmd.pch.pch_output.empty() && !cmd.source.empty()) {
-                fs::path src_path(cmd.source);
-                cmd.pch.pch_output = src_path.replace_extension(".gch");
+            // GCC/Clang PCH output: an explicit -o wins (that IS the .gch);
+            // otherwise default to <source_name>.gch.
+            if (cmd.pch.pch_output.empty() && !cmd.output.empty()) {
+                cmd.pch.pch_output = cmd.output;
+            } else if (cmd.pch.pch_output.empty() && !cmd.source.empty()) {
+                // GCC/Clang append .gch: foo.hpp -> foo.hpp.gch
+                cmd.pch.pch_output = cmd.source.string() + ".gch";
             }
             // For -x c++-header, the source IS the header being precompiled
             if (cmd.pch.pch_source.empty() && !cmd.source.empty()) {
@@ -1732,8 +1757,7 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
         } else if (info.type == CompilerType::GCC || info.type == CompilerType::Clang) {
             // GCC/Clang -include: PCH input is typically <header>.gch
             if (cmd.pch.pch_output.empty() && !cmd.pch.pch_source.empty()) {
-                fs::path hdr_path(cmd.pch.pch_source);
-                cmd.pch.pch_output = hdr_path.replace_extension(".gch");
+                cmd.pch.pch_output = cmd.pch.pch_source.string() + ".gch";
             }
         }
     }
@@ -1956,7 +1980,10 @@ std::string get_compiler_hash(const std::string& compiler_path) {
 
     std::filesystem::path path(compiler_path);
     if (!std::filesystem::exists(path)) {
-        return std::to_string(std::hash<std::string>{}(compiler_path));
+        // Stable SHA-256 of the path so the fingerprint has the same shape as
+        // every other fingerprint (64 hex chars) instead of a varying-length
+        // decimal std::hash value.
+        return compute_sha256("path|" + compiler_path);
     }
 
     if (mode == CompilerCheckMode::Content) {

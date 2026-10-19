@@ -65,10 +65,14 @@ int main() {
     std::cout << "Put result: success\n";
     std::cout.flush();
     
-    // Verify cache directory has both files
+    // Verify cache directory has both files. When built with zstd the blobs are
+    // stored with a ".zst" suffix, so accept either form.
     fs::path key_dir = test_cache / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
-    assert(fs::exists(key_dir / "test.o") && "Object file should be in cache");
-    assert(fs::exists(key_dir / "test.pdb") && "PDB file should be in cache");
+    auto cached_blob_exists = [&](const std::string& base) {
+        return fs::exists(key_dir / base) || fs::exists(key_dir / (base + ".zst"));
+    };
+    assert(cached_blob_exists("test.o") && "Object file should be in cache");
+    assert(cached_blob_exists("test.pdb") && "PDB file should be in cache");
     std::cout << "Cache directory has both object and PDB files\n";
     std::cout.flush();
     

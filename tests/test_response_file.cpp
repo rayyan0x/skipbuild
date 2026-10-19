@@ -291,7 +291,8 @@ void test_response_file_utf8_bom() {
     fs::path rsp_file = test_dir / "c.rsp";
     std::ofstream ofs(rsp_file, std::ios::binary);
     // Write UTF-8 BOM (0xEF, 0xBB, 0xBF) followed by content
-    ofs.write("\xEF\xBB\xBF-c -o main.o main.cpp", 21);
+    const std::string bom_content = "\xEF\xBB\xBF-c -o main.o main.cpp";
+    ofs.write(bom_content.data(), static_cast<std::streamsize>(bom_content.size()));
     ofs.close();
     
     std::string rsp_arg = "@" + rsp_file.string();

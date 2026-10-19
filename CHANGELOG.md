@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The test suite now actually asserts.** `assert()` is compiled out when `NDEBUG` is defined, which Release/RelWithDebInfo builds do — so the previous "14/14" CI result validated nothing. Test targets are now built with `NDEBUG` undefined (`/UNDEBUG` on MSVC, `-UNDEBUG` elsewhere), which surfaced and fixed six long-standing latent failures:
+  - `get_compiler_hash()` on a non-existent compiler path returns a stable 64-hex SHA-256 instead of a variable-length decimal `std::hash` value, so the fingerprint shape is consistent.
+  - The parser now accepts the attached MSVC PCH forms (`/Yc"pch.h"`, `/Yupch.h`, `/Ycpch.h`) and treats a header passed to `-x c++-header` as the input file; GCC/Clang PCH outputs follow the `<header>.gch` convention (appending `.gch`) and an explicit `-o` is honoured.
+  - A cache miss is recorded once, not twice (`Cache::get()` and `Cache::safe_get()` were both counting it), so `--stats` miss counts are correct.
+  - Zero-byte object files are no longer stored, so an empty/failed compile output cannot poison a cache key.
+- Test fixtures were corrected where the *test* (not the code) was wrong: the response-file BOM case wrote too few bytes, the sidecar test assumed an uncompressed cache layout, and the eviction test used a hard-coded byte budget that didn't match the compressed entry sizes (and measured the cache size only after a `get()` had already decompressed blobs back into the entry directory).
+
 ## [0.3.0] - 2026-10-18
 
 ### Added

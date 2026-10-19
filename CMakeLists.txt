@@ -78,16 +78,30 @@ function(skipbuild_sanitize target)
     endif()
 endfunction()
 
+# Tests assert() their expectations, but NDEBUG (defined by Release/RelWithDebInfo)
+# compiles assert() out - so a Release build would "pass" without checking
+# anything. Undefine NDEBUG for test targets so ctest is meaningful in every
+# configuration.
+function(skipbuild_enable_asserts target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(${target} PRIVATE -UNDEBUG)
+    endif()
+endfunction()
+
 foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats pch response_file key_soundness)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} remake_core)
     skipbuild_sanitize(test_${t})
+    skipbuild_enable_asserts(test_${t})
 endforeach()
 
 add_executable(test_init tests/test_init.cpp)
 target_link_libraries(test_init remake_core)
 target_include_directories(test_init PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cli)
 skipbuild_sanitize(test_init)
+skipbuild_enable_asserts(test_init)
 
 foreach(tgt remake_core skipbuild)
     skipbuild_werror(${tgt})

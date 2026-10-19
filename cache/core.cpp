@@ -2040,7 +2040,9 @@ std::string normalize_path_for_key(const std::filesystem::path& path, const std:
     
     // Strip build root prefix if provided
     if (!build_root.empty()) {
-        std::filesystem::path root_canon = std::filesystem::weakly_canonical(build_root);
+        std::filesystem::path root_canon = build_root.is_absolute()
+            ? std::filesystem::weakly_canonical(build_root)
+            : build_root.lexically_normal();
         std::string root_str = root_canon.string();
         std::replace(root_str.begin(), root_str.end(), '\\', '/');
         #ifdef _WIN32

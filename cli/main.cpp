@@ -205,6 +205,15 @@ int run_compiler(const std::vector<std::string>& args) {
     return spawn_argv(args);
 }
 
+// Build the passthrough argument vector for the wrapped compiler: drop argv[0]
+// (the launcher itself) and an optional "--" separator, so
+// `skipbuild -- g++ ...` and `skipbuild g++ ...` both replay `g++ ...`.
+static std::vector<std::string> passthrough_compiler_args(char** argv, int argc) {
+    int start = 1;
+    if (start < argc && std::string(argv[start]) == "--") ++start;
+    return std::vector<std::string>(argv + start, argv + argc);
+}
+
 // Run a process, capturing its combined stdout+stderr. Returns false if the
 // process could not be started at all.
 #ifdef _WIN32
@@ -657,8 +666,7 @@ int main(int argc, char* argv[]) {
     
     // Check for disable
     if (std::getenv("SKIPBUILD_DISABLE")) {
-        std::vector<std::string> args(filtered_argv_data + 1, filtered_argv_data + filtered_argc);
-        return run_compiler(args) ? 0 : 1;
+        return run_compiler(passthrough_compiler_args(filtered_argv_data, filtered_argc));
     }
 
     // Debug logging (moved earlier for MSBuild detection)
@@ -711,8 +719,7 @@ int main(int argc, char* argv[]) {
                     if (!ec && out_time > src_time) {
                         // Output is newer than source - incremental build, skip cache
                         skipbuild::log_debug("MSBuild incremental detected (output newer than source), bypassing cache");
-                        std::vector<std::string> args(filtered_argv_data + 1, filtered_argv_data + filtered_argc);
-                        return run_compiler(args) ? 0 : 1;
+                        return run_compiler(passthrough_compiler_args(filtered_argv_data, filtered_argc));
                     }
                 }
             }
@@ -758,9 +765,22 @@ int main(int argc, char* argv[]) {
     std::string cmd_full = find_compiler_in_path(cmd_name);
     compiler_argv[0] = const_cast<char*>(cmd_full.c_str());
     
+    // A compile-only invocation (-c on GCC/Clang, /c on MSVC) is never a link,
+    // even when the driver is a C++ compiler such as g++/clang++ that also acts
+    // as the linker. Without this, every g++/clang++ compile is misrouted to the
+    // linker cache, whose key ignores the source and compile flags.
+    bool has_compile_only_flag = false;
+    for (int i = 1; i < compiler_argc; ++i) {
+        if (std::string(compiler_argv[i]) == "-c" || std::string(compiler_argv[i]) == "/c") {
+            has_compile_only_flag = true;
+            break;
+        }
+    }
+
     // Detect if this is a linker command
     auto linker_type = skipbuild::detect_linker_type(cmd_full);
-    bool is_linker = (linker_type != skipbuild::LinkerType::Unknown);
+    bool is_linker = (!has_compile_only_flag) &&
+                     (linker_type != skipbuild::LinkerType::Unknown);
     
     if (is_linker) {
         // Handle linker command
@@ -792,15 +812,22 @@ int main(int argc, char* argv[]) {
             bool restore_ok = true;
             for (auto& cached_out : entry->outputs) {
                 std::error_code ec;
-                fs::copy_file(cached_out, link_cmd->output, fs::copy_options::overwrite_existing, ec);
+                // Restore each artifact under its original filename next to the
+                // linker output. For DLL links both the .dll and its import .lib
+                // are cached; writing them all to link_cmd->output would clobber
+                // the DLL with the import library.
+                fs::path target = link_cmd->output.parent_path() / cached_out.filename();
+                fs::copy_file(cached_out, target, fs::copy_options::overwrite_existing, ec);
                 if (ec) {
                     restore_ok = false;
                     skipbuild::log_debug("Failed to restore: " + ec.message());
                 }
-                skipbuild::log_debug("Restored: " + link_cmd->output.string());
+                skipbuild::log_debug("Restored: " + target.string());
             }
+            // Done with the staged outputs either way: release now so a failed
+            // restore does not leak the private staging directory.
+            cache.release(*entry);
             if (restore_ok) {
-                cache.release(*entry);
                 return 0;
             }
             // If restore failed, fall through to native execution
@@ -934,8 +961,10 @@ int main(int argc, char* argv[]) {
             skipbuild::log_debug("Restored sidecar: " + target.string());
         }
         
+        // Release the staged copies whether or not the restore succeeded, so a
+        // failed restore does not leak the private staging directory.
+        cache.release(*entry);
         if (restore_ok) {
-            cache.release(*entry);
             return 0;
         }
         // If restore failed, fall through to native execution

@@ -251,19 +251,22 @@ void test_cache_restore_failure_fallback() {
     
     // Make the cached file unreadable (Unix only)
     #ifndef _WIN32
-    fs::permissions(cached_obj, fs::perms::none);
-    
+    std::error_code perm_ec;
+    fs::permissions(cached_obj, fs::perms::none, perm_ec);
+
     // safe_get should still succeed (it reads the file), but copying to target would fail
     auto entry = cache.safe_get(key);
-    if (entry) {
+    if (entry && !entry->outputs.empty()) {
         // Try to copy to a target - this should fail due to permissions
         fs::path target = test_dir / "restored.o";
         std::error_code ec;
         fs::copy_file(entry->outputs[0], target, fs::copy_options::overwrite_existing, ec);
-        
-        // Restore permissions for cleanup
-        fs::permissions(cached_obj, fs::perms::owner_all);
-        
+
+        // Restore permissions for cleanup (the file may already be gone if the
+        // entry was purged, so never let this throw).
+        std::error_code rec;
+        fs::permissions(cached_obj, fs::perms::owner_all, rec);
+
         // On some systems, root can still read, so this might not fail
         if (ec) {
             std::cout << "  PASS: Cache restore failure detected: " << ec.message() << "\n";
@@ -271,7 +274,8 @@ void test_cache_restore_failure_fallback() {
             std::cout << "  NOTE: Copy succeeded despite permissions (running as root?)\n";
         }
     } else {
-        fs::permissions(cached_obj, fs::perms::owner_all);
+        std::error_code rec;
+        fs::permissions(cached_obj, fs::perms::owner_all, rec);
         std::cout << "  NOTE: safe_get returned nullopt (entry may have been purged)\n";
     }
     #else

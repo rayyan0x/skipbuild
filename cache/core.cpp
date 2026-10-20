@@ -16,6 +16,7 @@
 #include <mutex>
 #include <memory>
 #include <cstdint>
+#include <random>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -611,17 +612,17 @@ CacheKey Cache::compute_key(const std::filesystem::path& source,
     auto build_root = find_build_root(source);
     std::string norm_source = normalize_path_for_key(source, build_root);
     
-    // Normalize include paths
+    // Normalize include paths. Include order determines header resolution, so the
+    // command-line order is preserved (do NOT sort).
     std::vector<std::string> norm_includes;
     norm_includes.reserve(includes.size());
     for (const auto& inc : includes) {
         norm_includes.push_back(normalize_path_for_key(inc, build_root));
     }
-    std::sort(norm_includes.begin(), norm_includes.end());
-    
-    // Normalize flags (sort for determinism)
+
+    // Preserve flag order: -D/-U (and similar) are order sensitive, e.g.
+    // "-DFOO -UFOO" does not behave like "-UFOO -DFOO". Do NOT sort.
     std::vector<std::string> norm_flags = flags;
-    std::sort(norm_flags.begin(), norm_flags.end());
     
     // Get relevant environment hash
     std::string env_hash = get_relevant_env_hash();
@@ -652,10 +653,9 @@ CacheKey Cache::compute_key_from_command(const CompileCommand& cmd) {
     for (const auto& inc : cmd.includes) {
         norm_includes.push_back(normalize_path_for_key(inc, build_root));
     }
-    std::sort(norm_includes.begin(), norm_includes.end());
-    
+
+    // Preserve order (include search order and -D/-U order are significant).
     std::vector<std::string> norm_flags = cmd.flags;
-    std::sort(norm_flags.begin(), norm_flags.end());
     
     auto base_key = compute_key(cmd.source, norm_includes, norm_flags, cmd.compiler_hash, 
                                 detect_compiler(cmd.compiler_path).type);
@@ -832,26 +832,31 @@ bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& o
         success = true;
     }
     
-    // Update cache size stats after releasing all locks
+    // Update cache-wide stats after releasing all locks. Previously this stored
+    // the literal count 1 and just this entry's size, so the reported entry count
+    // was always 1 and the reported size only ever reflected the last entry.
+    // Recompute the totals from the actual on-disk entries instead.
     if (success) {
-        stats_tracker_->update_cache_size(1, total_size, max_cache_size);
-    }
-
-    // Auto-clear: once the cache reaches auto_clear_ratio of the configured
-    // limit, purge everything (free the space back to zero) rather than waiting
-    // for the periodic prune. <= 0 disables the behaviour.
-    if (success && config_.max_cache_size_bytes > 0 && config_.auto_clear_ratio > 0.0) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         auto entries = collect_entries();
         int64_t usage = 0;
         for (const auto& e : entries) usage += e.size_bytes;
-        int64_t trigger = static_cast<int64_t>(config_.max_cache_size_bytes * config_.auto_clear_ratio);
-        if (usage >= trigger) {
-            for (const auto& e : entries) {
-                purge_corrupted_entry(e);
+
+        // Auto-clear: once the cache reaches auto_clear_ratio of the configured
+        // limit, purge everything (free the space back to zero) rather than
+        // waiting for the periodic prune. <= 0 disables the behaviour.
+        if (config_.max_cache_size_bytes > 0 && config_.auto_clear_ratio > 0.0) {
+            int64_t trigger = static_cast<int64_t>(config_.max_cache_size_bytes * config_.auto_clear_ratio);
+            if (usage >= trigger) {
+                for (const auto& e : entries) {
+                    purge_corrupted_entry(e);
+                }
+                entries.clear();
+                usage = 0;
             }
-            stats_tracker_->update_cache_size(0, 0, max_cache_size);
         }
+
+        stats_tracker_->update_cache_size(static_cast<int64_t>(entries.size()), usage, max_cache_size);
     }
 
     return success;
@@ -922,7 +927,7 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key) const {
                                 fs::path sidecar_path = key_dir / *safe_name;
                                 if (write_file(sidecar_path, decompressed)) {
                                     SidecarInfo si;
-                                    si.relative_path = sidecar_path.filename();
+                                    si.relative_path = sidecar_path;
                                     si.hash = compute_sha256(decompressed);
                                     
                                     // Determine sidecar type from extension
@@ -1019,6 +1024,39 @@ bool Cache::safe_put(const CacheKey& key, const std::vector<std::filesystem::pat
     return local_ok;
 }
 
+namespace {
+
+// Create a private, per-lookup staging directory. Decompressed artifacts are
+// materialised here - never inside the shared entry directory - so that
+// concurrent cache readers/writers cannot overwrite each other's copy and so
+// that release() only ever deletes files this process created.
+std::filesystem::path make_stage_dir(const std::filesystem::path& fallback_root) {
+    static std::atomic<uint64_t> counter{0};
+    // Per-process random salt keeps directories unique across processes without
+    // relying on platform-specific process-id APIs.
+    static const uint64_t salt = [] {
+        std::random_device rd;
+        return (static_cast<uint64_t>(rd()) << 32) ^ static_cast<uint64_t>(rd());
+    }();
+    std::error_code ec;
+    std::filesystem::path base = std::filesystem::temp_directory_path(ec);
+    if (ec || base.empty()) base = fallback_root;
+    std::ostringstream name;
+    name << "skipbuild-stage-" << std::hex << salt << "-"
+         << counter.fetch_add(1, std::memory_order_relaxed) << "-"
+         << std::chrono::steady_clock::now().time_since_epoch().count();
+    std::filesystem::path dir = base / name.str();
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        ec.clear();
+        std::filesystem::remove_all(dir, ec);
+        return {};
+    }
+    return dir;
+}
+
+} // namespace
+
 std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
     // First, acquire the cache mutex to do the lookup
     std::optional<CacheEntry> result;
@@ -1046,13 +1084,15 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                 std::ifstream meta_check(meta_file);
                 std::string meta_content((std::istreambuf_iterator<char>(meta_check)), std::istreambuf_iterator<char>());
                 if (meta_content.find("\"toolchain\"") == std::string::npos) {
-                    // Corrupted meta.json - purge and return nullopt
+                    // Corrupted meta.json - purge and return nullopt. Drop the
+                    // shared lock first so the exclusive acquire below cannot
+                    // deadlock against our own lock.
+                    scoped_lock.release();
                     FileLock file_lock_excl(lock_file);
                     FileLock::ScopedLock excl_lock(file_lock_excl, FileLock::LockType::Exclusive);
                     if (excl_lock) {
                         std::filesystem::remove_all(key_dir, ec);
                     }
-                    // Cache mutex released here
                 } else {
                     CacheEntry entry;
                     entry.key = key;
@@ -1060,8 +1100,10 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                     entry.size_bytes = 0;
 
                     bool has_corrupted = false;
-                    
+                    std::filesystem::path stage_dir;  // private per-lookup staging dir
+
                     for (auto& f : std::filesystem::directory_iterator(key_dir, ec)) {
+                        if (f.is_directory(ec)) continue;
                         if (f.path().filename() != "meta.json" && f.path().filename() != ".lock") {
                             auto size = std::filesystem::file_size(f.path(), ec);
                             if (size == 0) {
@@ -1072,9 +1114,21 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                             std::string ext = f.path().extension().string();
                             #if REMAKE_HAVE_ZSTD
                             if (ext == ".zst") {
-                                // Decompress to cache directory (remove .zst extension)
-                                // This overwrites any previously decompressed file
-                                std::filesystem::path dest_path = key_dir / f.path().stem();
+                                // Materialise the artifact into a private staging
+                                // directory rather than the shared entry directory.
+                                // Writing a fixed path under a shared lock let two
+                                // processes clobber each other's copy, and let one
+                                // process's release() delete a copy another was
+                                // still using. A per-lookup directory removes both
+                                // hazards.
+                                if (stage_dir.empty()) {
+                                    stage_dir = make_stage_dir(root_);
+                                    if (stage_dir.empty()) {
+                                        has_corrupted = true;
+                                        break;
+                                    }
+                                }
+                                std::filesystem::path dest_path = stage_dir / f.path().stem();
                                 if (!decompress_file(f.path(), dest_path)) {
                                     has_corrupted = true;
                                     break;
@@ -1087,7 +1141,7 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                                 std::string stem_ext = dest_path.extension().string();
                                 if (stem_ext == ".pdb" || stem_ext == ".idb" || stem_ext == ".dwo") {
                                     SidecarInfo si;
-                                    si.relative_path = dest_path.filename();
+                                    si.relative_path = dest_path;
                                     si.hash = compute_file_hash(dest_path);
                                     
                                     if (stem_ext == ".pdb") si.type = SidecarType::PDB;
@@ -1108,7 +1162,7 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                                 // Check if it's a sidecar file by checking extension
                                 if (ext == ".pdb" || ext == ".idb" || ext == ".dwo") {
                                     SidecarInfo si;
-                                    si.relative_path = f.path().filename();
+                                    si.relative_path = f.path();
                                     si.hash = compute_file_hash(f.path());
                                     
                                     if (ext == ".pdb") si.type = SidecarType::PDB;
@@ -1141,18 +1195,26 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
 
                     // Check for zero-byte outputs or missing outputs
                     if (entry.outputs.empty() || has_corrupted) {
-                        // Release shared lock (via scoped_lock destructor) and acquire exclusive lock to purge
-                    }
-                    
-                    if (entry.outputs.empty() || has_corrupted) {
-                        // scoped_lock goes out of scope here, releasing the shared lock
+                        // Nothing usable: drop the private staging directory and
+                        // purge the corrupt entry under an exclusive lock. Release
+                        // the shared lock first so the exclusive acquire cannot
+                        // deadlock against our own lock.
+                        if (!stage_dir.empty()) {
+                            std::error_code sec;
+                            std::filesystem::remove_all(stage_dir, sec);
+                        }
+                        scoped_lock.release();
                         FileLock file_lock_excl(lock_file);
                         FileLock::ScopedLock excl_lock(file_lock_excl, FileLock::LockType::Exclusive);
                         if (excl_lock) {
                             std::filesystem::remove_all(key_dir, ec);
                         }
-                        // Cache mutex released here
                     } else {
+                        if (!stage_dir.empty()) {
+                            // release() removes this directory once the caller has
+                            // copied the outputs out.
+                            entry.transient_files.push_back(stage_dir);
+                        }
                         update_access_time(key.hash);
                         hit = true;
                         entry_size = entry.size_bytes;
@@ -1189,17 +1251,12 @@ void Cache::update_access_time(const std::string& hash) const {
 }
 
 void Cache::release(const CacheEntry& entry) const {
+    // transient_files only ever holds artifacts this process materialised in its
+    // private staging directory (plus that directory itself), so removing them
+    // unconditionally is safe and cannot affect another reader or writer.
     for (const auto& path : entry.transient_files) {
         std::error_code ec;
-        // Only remove a decompressed copy when the compressed blob it was
-        // produced from is still present (i.e. it is regenerable). A plain
-        // (legacy, uncompressed) cache file has no ".zst" sibling and is left
-        // untouched.
-        std::filesystem::path blob = path;
-        blob += ".zst";
-        if (std::filesystem::exists(blob, ec)) {
-            std::filesystem::remove(path, ec);
-        }
+        std::filesystem::remove_all(path, ec);
     }
 }
 
@@ -1598,7 +1655,7 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
             cmd.output = expanded_argv[++i];
             cmd.args.push_back(arg);
             cmd.args.push_back(expanded_argv[i]);
-        } else if (arg.rfind("-I", 0) == 0 || arg.rfind("/I", 0) == 0) {
+        } else if ((arg.rfind("-I", 0) == 0 || arg.rfind("/I", 0) == 0) && arg.size() > 2) {
             std::string prefix = arg.rfind("-I", 0) == 0 ? "-I" : "/I";
             cmd.includes.push_back(arg.substr(prefix.size()));
             cmd.args.push_back(arg);
@@ -1904,46 +1961,53 @@ std::optional<LinkerCommand> parse_linker_command(int argc, char* argv[]) {
 
 CacheKey compute_linker_key(const LinkerCommand& cmd) {
     std::ostringstream oss;
-    oss << "link|";
-    
-    // Normalize input paths
-    std::vector<std::string> norm_inputs;
-    norm_inputs.reserve(cmd.inputs.size());
+    oss << "link|" << static_cast<int>(cmd.type) << "|";
+
+    // Inputs: keep the command-line order (it is significant for static
+    // libraries / --start-group) and fold in the *content* hash of each input so
+    // that recompiling or editing an object/library invalidates the entry. The
+    // path itself is hashed normalized so the key stays machine-independent.
     for (const auto& input : cmd.inputs) {
-        norm_inputs.push_back(normalize_path_for_key(input));
+        oss << normalize_path_for_key(input) << "|";
+        std::string h = compute_file_hash(input);
+        oss << (h.empty() ? std::string("nohash") : h) << "|";
     }
-    std::sort(norm_inputs.begin(), norm_inputs.end());
-    for (const auto& input : norm_inputs) {
-        oss << input << "|";
-    }
-    
-    // Normalize library paths
-    std::vector<std::string> norm_libs = cmd.libraries;
-    std::sort(norm_libs.begin(), norm_libs.end());
-    for (const auto& lib : norm_libs) {
+
+    // Libraries and search directories: order is significant, so do not sort.
+    for (const auto& lib : cmd.libraries) {
         oss << lib << "|";
     }
-    
-    // Normalize library dirs
-    std::vector<std::string> norm_dirs;
-    norm_dirs.reserve(cmd.library_dirs.size());
     for (const auto& dir : cmd.library_dirs) {
-        norm_dirs.push_back(normalize_path_for_key(dir));
-    }
-    std::sort(norm_dirs.begin(), norm_dirs.end());
-    for (const auto& dir : norm_dirs) {
         oss << dir << "|";
     }
-    
+
+    // Remaining flags/args (everything that is not an input or the output, both
+    // of which are covered above). Order is preserved because linkers treat some
+    // flags positionally (-Wl,--start-group, /ORDER:, etc.).
+    for (const auto& a : cmd.args) {
+        bool covered = (a == cmd.output.string());
+        if (!covered) {
+            for (const auto& input : cmd.inputs) {
+                if (a == input.string()) {
+                    covered = true;
+                    break;
+                }
+            }
+        }
+        if (!covered) {
+            oss << a << "|";
+        }
+    }
+
     // Normalize output path
     std::string norm_output = normalize_path_for_key(cmd.output);
     oss << norm_output << "|";
     oss << cmd.linker_hash << "|";
-    
+
     // Include relevant environment hash
     std::string env_hash = get_relevant_env_hash();
     oss << env_hash;
-    
+
     CacheKey key;
     key.hash = compute_sha256(oss.str());
     key.toolchain_id = cmd.linker_hash;

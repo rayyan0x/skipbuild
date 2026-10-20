@@ -72,6 +72,16 @@ int main() {
           key_for("fake-g++.exe", {"-c", "a.cpp", "-DFOO=1"}).hash,
           "identical commands produce identical keys");
 
+    // Order sensitivity: -D/-U and include order are semantically significant, so
+    // reordering them must change the key.
+    check(key_for("fake-g++.exe", {"-c", "a.cpp", "-DFOO", "-UFOO"}).hash !=
+          key_for("fake-g++.exe", {"-c", "a.cpp", "-UFOO", "-DFOO"}).hash,
+          "GCC -DFOO -UFOO vs -UFOO -DFOO produce different keys");
+
+    check(key_for("fake-g++.exe", {"-c", "a.cpp", "-I", "inc1", "-I", "inc2"}).hash !=
+          key_for("fake-g++.exe", {"-c", "a.cpp", "-I", "inc2", "-I", "inc1"}).hash,
+          "GCC include order affects the key");
+
     // Header dependencies: changing header content must change the key.
     fs::path dir = fs::temp_directory_path() / "skipbuild_key_soundness";
     std::error_code ec;

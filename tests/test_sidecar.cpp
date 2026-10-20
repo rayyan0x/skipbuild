@@ -122,9 +122,8 @@ int main() {
     std::cout.flush();
     
     // Test restoring sidecar to work directory
-    // The sidecar's relative_path is relative to the cache entry directory
-    // Construct the full path to the cached sidecar
-    fs::path cached_pdb = key_dir / entry->sidecars[0].relative_path;
+    // The sidecar's relative_path is the materialised path of the cached file.
+    fs::path cached_pdb = entry->sidecars[0].relative_path;
     fs::path restored_pdb = work_dir / "restored.pdb";
     fs::copy_file(cached_pdb, restored_pdb, fs::copy_options::overwrite_existing);
     assert(fs::exists(restored_pdb) && "Restored PDB should exist");

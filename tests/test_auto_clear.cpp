@@ -103,14 +103,21 @@ static void test_transient_decompression() {
     auto entry = cache.get(key);
     assert(entry.has_value());
     assert(!entry->transient_files.empty() && "a hit should mark its transient files");
-    assert(fs::exists(key_dir / "r.o") && "decompressed copy exists while in use");
+    assert(!entry->outputs.empty());
+    // The decompressed copy must live in a private staging directory, NOT inside
+    // the shared entry directory, so concurrent readers never collide.
+    assert(fs::exists(entry->outputs[0]) && "decompressed copy exists while in use");
+    assert(!fs::exists(key_dir / "r.o") && "no decompressed copy inside the shared entry dir");
 
     // Size accounting must not double just because a copy was materialised.
     assert(cache.get_stats().total_size == stored_size && "transient copy must not inflate the cache size");
 
     // Caller finished with the outputs: the regenerable copy is released.
+    fs::path staged = entry->outputs[0];
+    fs::path stage_dir = staged.parent_path();
     cache.release(*entry);
-    assert(!fs::exists(key_dir / "r.o") && "decompressed copy should be released");
+    assert(!fs::exists(staged) && "staged copy should be released");
+    assert(!fs::exists(stage_dir) && "staging directory should be removed");
     assert(fs::exists(key_dir / "r.o.zst") && "compressed blob must remain");
 
     // The entry is still served afterwards.

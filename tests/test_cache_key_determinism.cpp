@@ -272,11 +272,24 @@ void test_linker_key_normalization() {
     assert(key1.hash == key2.hash);
     std::cout << "  PASS: Linker key deterministic: " << key1.hash.substr(0, 16) << "...\n";
     
-    // Test different order of inputs produces same key (due to sorting)
+    // Link order is significant (e.g. for static libraries / --start-group), so
+    // reordering the inputs must change the key.
     std::swap(cmd.inputs[0], cmd.inputs[1]);
     auto key3 = skipbuild::compute_linker_key(cmd);
-    assert(key1.hash == key3.hash);
-    std::cout << "  PASS: Linker key order independent\n";
+    assert(key1.hash != key3.hash);
+    std::cout << "  PASS: Linker key is order sensitive\n";
+
+    // Reordering the libraries must also change the key.
+    std::swap(cmd.libraries[0], cmd.libraries[1]);
+    auto key4 = skipbuild::compute_linker_key(cmd);
+    assert(key3.hash != key4.hash);
+    std::cout << "  PASS: Linker key is library-order sensitive\n";
+
+    // Editing an input's contents must change the key.
+    std::ofstream(cmd.inputs[0]) << "obj1-modified";
+    auto key5 = skipbuild::compute_linker_key(cmd);
+    assert(key4.hash != key5.hash);
+    std::cout << "  PASS: Linker key reflects input contents\n";
     
     fs::remove_all(test_dir);
 }

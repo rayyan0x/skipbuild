@@ -59,6 +59,9 @@ public:
         ScopedLock(const ScopedLock&) = delete;
         ScopedLock& operator=(const ScopedLock&) = delete;
         explicit operator bool() const { return acquired_; }
+        // Release the lock early. Needed before taking an exclusive lock on the
+        // same file, which would otherwise deadlock against our own shared lock.
+        void release() { if (acquired_) { lock_.unlock(); acquired_ = false; } }
     };
 };
 
@@ -95,7 +98,7 @@ enum class SidecarType {
 
 struct SidecarInfo {
     SidecarType type = SidecarType::None;
-    std::filesystem::path relative_path;  // Relative path from cache entry directory
+    std::filesystem::path relative_path;  // Materialised path of the sidecar (copy source)
     std::string hash;                      // SHA256 hash for validation
     std::string original_path;             // Original absolute path where it should be restored
 };
@@ -104,9 +107,11 @@ struct CacheEntry {
     CacheKey key;
     std::vector<std::filesystem::path> outputs;  // Primary outputs (.obj, .o)
     std::vector<SidecarInfo> sidecars;           // Debug/sidecar files (.pdb, .dwo, etc.)
-    // Decompressed copies materialised inside the entry directory by get().
-    // They are regenerable from the stored .zst blobs, so the caller may delete
-    // them once the outputs have been copied out (see Cache::release).
+    // Decompressed copies materialised by get() in a private, per-lookup staging
+    // directory (never inside the shared entry directory). They are regenerable
+    // from the stored .zst blobs, so the caller may delete them once the outputs
+    // have been copied out (see Cache::release). The staging directory itself is
+    // included as the last element.
     std::vector<std::filesystem::path> transient_files;
     int64_t timestamp;
     int64_t size_bytes;

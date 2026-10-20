@@ -7,10 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
 ### Added
 - **Automatic cache clear-to-zero.** Once usage reaches `auto_clear_ratio` (default `0.95`) of `max_cache_size_bytes`, `put()` purges every entry and frees the space back to zero instead of waiting for the throttled LRU prune. Configurable via `auto_clear_ratio`/`auto_clear` in the config file or `SKIPBUILD_AUTO_CLEAR_RATIO`/`BUILDCACHE_AUTO_CLEAR_RATIO`; `<= 0` disables it.
 
+### Changed
+- **Compile keys preserve argument order.** Include search directories and flags (`-D`/`-U`/`-I`, …) are no longer sorted before hashing, since their order is semantically significant (`-DFOO -UFOO` differs from `-UFOO -DFOO`; include order changes header resolution). A separate-form `-I <dir>` was also being swallowed by the attached-form parser branch and silently recorded as empty — now parsed correctly.
+- **Linker keys are order- and content-sensitive.** `compute_linker_key()` keeps the command-line order of inputs, libraries and search directories (significant for static libraries / `--start-group`), folds the content hash of every input into the key, and includes the remaining link flags/args. Previously the inputs/libraries were sorted and only their paths were hashed, so editing an object or reordering libraries produced a stale `LINK HIT`.
+
 ### Fixed
+- **`g++`/`clang++` compile-only commands (`-c`) were misrouted to the linker cache**, whose key ignores the source and compile flags, so every recompile of a file replayed a stale cached object. Such commands now go through the compiler path.
+- **Exit codes on bypass paths were inverted** (`return run_compiler(args) ? 0 : 1;`), and the optional `--` separator was passed to the compiler as a source file. Bypass paths now return the compiler's real exit code, propagate spawn failures (127), and drop `--`.
+- **DLL link-hit restore clobbered the DLL with its import library** — every cached artifact was written to the linker output path. Each artifact is now restored under its own filename next to the output.
+- **Concurrent cache reads could corrupt/delete each other's decompressed copies.** `get()` used to decompress every hit to a fixed path *inside* the shared entry directory while holding only a shared lock, so parallel builds could overwrite each other's copy, and `release()` deleted that shared file even if another reader was still copying it. Decompressed artifacts are now materialised in a private per-lookup staging directory (outside the entry directory) and `release()` only removes that directory. Sidecars now carry the path of the materialised file, and the CLI releases staged files even when a restore fails.
+- **Purging a corrupt entry self-deadlocked.** The exclusive lock needed to delete the entry was requested while the same process still held its shared lock on the entry's `.lock`, so the acquire spun until timeout and the entry was never removed. The shared lock is now released first.
+- **`--stats` reported the wrong cache size.** `update_cache_size()` stored the literal count `1` and the size of only the most recent entry on every `put()`, so the entry count was always 1 and the total size was meaningless. The real totals are now recomputed from the on-disk entries.
 - **Cache hits no longer inflate the entry.** `Cache::get()` decompresses stored `.zst` blobs back into the entry directory, and those copies were left behind, roughly doubling an entry's on-disk size on every hit. The decompressed copies are now tracked (`CacheEntry::transient_files`) and deleted via the new `Cache::release()` once the CLI has copied the outputs out, so the compressed blob remains the only stored artifact. Size accounting also skips a decompressed copy that duplicates a `.zst` sibling.
 - On Windows, cache-entry `.lock` files are opened with `FILE_SHARE_DELETE`, so purging an entry (which holds the lock open while calling `remove_all`) can actually delete it; previously `purge_corrupted_entry()` silently left the entry in place.
 - **The test suite now actually asserts.** `assert()` is compiled out when `NDEBUG` is defined, which Release/RelWithDebInfo builds do — so the previous "14/14" CI result validated nothing. Test targets are now built with `NDEBUG` undefined (`/UNDEBUG` on MSVC, `-UNDEBUG` elsewhere), which surfaced and fixed six long-standing latent failures:

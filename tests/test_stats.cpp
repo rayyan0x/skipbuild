@@ -318,9 +318,11 @@ void test_stats_update_cache_size() {
         cache.safe_put(key_i, {obj});
     }
     
-    // The put operation should have updated cache size
+    // The put operation should have updated cache size. Three distinct keys were
+    // stored, so the reported entry count must be the real total (it used to be
+    // hard-coded to 1 on every put).
     auto stats = cache.get_detailed_stats();
-    assert(stats.entries >= 1);
+    assert(stats.entries == 3);
     assert(stats.total_size_bytes > 0);
     assert(stats.max_cache_size_bytes > 0);
     std::cout << "  PASS: Cache size updated (entries=" << stats.entries 

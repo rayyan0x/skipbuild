@@ -16,6 +16,7 @@
 #include <mutex>
 #include <memory>
 #include <cstdint>
+#include <random>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -1025,26 +1026,24 @@ bool Cache::safe_put(const CacheKey& key, const std::vector<std::filesystem::pat
 
 namespace {
 
-uint64_t current_process_id() {
-#ifdef _WIN32
-    return static_cast<uint64_t>(::GetCurrentProcessId());
-#else
-    return static_cast<uint64_t>(::getpid());
-#endif
-}
-
 // Create a private, per-lookup staging directory. Decompressed artifacts are
 // materialised here - never inside the shared entry directory - so that
 // concurrent cache readers/writers cannot overwrite each other's copy and so
 // that release() only ever deletes files this process created.
 std::filesystem::path make_stage_dir(const std::filesystem::path& fallback_root) {
     static std::atomic<uint64_t> counter{0};
+    // Per-process random salt keeps directories unique across processes without
+    // relying on platform-specific process-id APIs.
+    static const uint64_t salt = [] {
+        std::random_device rd;
+        return (static_cast<uint64_t>(rd()) << 32) ^ static_cast<uint64_t>(rd());
+    }();
     std::error_code ec;
     std::filesystem::path base = std::filesystem::temp_directory_path(ec);
     if (ec || base.empty()) base = fallback_root;
     std::ostringstream name;
-    name << "skipbuild-stage-" << current_process_id() << "-"
-         << counter.fetch_add(1) << "-"
+    name << "skipbuild-stage-" << std::hex << salt << "-"
+         << counter.fetch_add(1, std::memory_order_relaxed) << "-"
          << std::chrono::steady_clock::now().time_since_epoch().count();
     std::filesystem::path dir = base / name.str();
     std::filesystem::create_directories(dir, ec);

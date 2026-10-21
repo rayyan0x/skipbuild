@@ -30,11 +30,19 @@ public:
         int64_t errors = 0;
     };
 
+    // A single cached artifact: the original filename plus its (compressed)
+    // bytes. Outputs and debug sidecars travel together so a remote hit can
+    // restore every artifact a compile/link produced.
+    struct Artifact {
+        std::string name;                 // Original filename, e.g. "foo.o"
+        bool is_sidecar = false;          // Debug sidecar (.pdb/.idb/.dwo)
+        std::vector<uint8_t> data;        // Compressed contents
+    };
+
     // Result of a remote get operation
     struct GetResult {
         bool success = false;
-        std::vector<uint8_t> primary_data;      // Compressed primary artifact
-        std::vector<std::pair<std::string, std::vector<uint8_t>>> sidecars; // name -> compressed data
+        std::vector<Artifact> artifacts;    // All outputs and sidecars
         std::string error;
     };
 
@@ -53,12 +61,11 @@ public:
     // Get entry from remote - downloads compressed artifacts
     GetResult get(const std::string& key_hash, const std::string& toolchain_id) const;
 
-    // Put entry to remote - compresses and uploads artifacts
-    // primary_data: compressed primary artifact
-    // sidecars: vector of (filename, compressed_data) pairs
+    // Put entry to remote - uploads every artifact and then a meta.json that
+    // lists them, so original filenames survive the round trip and a compile
+    // that produces several outputs is fully restorable.
     bool put(const std::string& key_hash, const std::string& toolchain_id,
-             const std::vector<uint8_t>& primary_data,
-             const std::vector<std::pair<std::string, std::vector<uint8_t>>>& sidecars = {});
+             const std::vector<Artifact>& artifacts);
 
     // Get statistics
     RemoteStats get_stats() const;

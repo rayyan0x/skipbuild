@@ -50,11 +50,23 @@ static bool read_file(const fs::path& path, std::vector<uint8_t>& data) {
 }
 
 static bool write_file(const fs::path& path, const std::vector<uint8_t>& data) {
-    fs::create_directories(path.parent_path());
-    std::ofstream f(path, std::ios::binary);
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) return false;
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) return false;
-    f.write(reinterpret_cast<const char*>(data.data()), data.size());
-    return f.good();
+    if (!data.empty()) {
+        f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    }
+    f.flush();
+    bool ok = f.good();
+    f.close();
+    if (!ok || f.fail()) {
+        std::error_code ec2;
+        fs::remove(path, ec2);
+        return false;
+    }
+    return true;
 }
 
 // Reduce a remote-supplied artifact name to a bare filename so that a hostile
@@ -466,10 +478,19 @@ static bool compress_file(const std::filesystem::path& input_path, const std::fi
         return false;
     }
     
-    std::ofstream out(output_path, std::ios::binary);
+    std::ofstream out(output_path, std::ios::binary | std::ios::trunc);
     if (!out) return false;
-    out.write(reinterpret_cast<const char*>(compressed.data()), compressed.size());
+    if (!compressed.empty()) {
+        out.write(reinterpret_cast<const char*>(compressed.data()), static_cast<std::streamsize>(compressed.size()));
+    }
+    out.flush();
+    bool ok = out.good();
     out.close();
+    if (!ok || out.fail()) {
+        std::error_code ec;
+        std::filesystem::remove(output_path, ec);
+        return false;
+    }
     return true;
 }
 
@@ -485,10 +506,19 @@ static bool decompress_file(const std::filesystem::path& input_path, const std::
         return false;
     }
     
-    std::ofstream out(output_path, std::ios::binary);
+    std::ofstream out(output_path, std::ios::binary | std::ios::trunc);
     if (!out) return false;
-    out.write(reinterpret_cast<const char*>(decompressed.data()), decompressed.size());
+    if (!decompressed.empty()) {
+        out.write(reinterpret_cast<const char*>(decompressed.data()), static_cast<std::streamsize>(decompressed.size()));
+    }
+    out.flush();
+    bool ok = out.good();
     out.close();
+    if (!ok || out.fail()) {
+        std::error_code ec;
+        std::filesystem::remove(output_path, ec);
+        return false;
+    }
     return true;
 }
 
@@ -532,7 +562,13 @@ static bool write_meta_json(const std::filesystem::path& meta_file, const std::f
     }
     meta << "}";
     meta.flush();
+    bool ok = meta.good();
     meta.close();
+    if (!ok || meta.fail()) {
+        std::error_code ec;
+        std::filesystem::remove(meta_temp, ec);
+        return false;
+    }
     
     return atomic_replace_file(meta_temp, meta_file);
 }

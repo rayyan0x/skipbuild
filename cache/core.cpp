@@ -1382,6 +1382,17 @@ void Cache::release(const CacheEntry& entry) const {
     }
 }
 
+// std::filesystem::file_time_type uses an implementation-defined epoch (1601 on
+// Windows), so its tick count cannot be compared with system_clock directly.
+// Project it onto the system clock using the current offset between the two.
+static int64_t file_time_to_unix_nanos(std::filesystem::file_time_type ftime) {
+    const auto sys_now = std::chrono::system_clock::now();
+    const auto file_now = std::filesystem::file_time_type::clock::now();
+    const auto delta = std::chrono::duration_cast<std::chrono::system_clock::duration>(ftime - file_now);
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        (sys_now + delta).time_since_epoch()).count();
+}
+
 std::vector<Cache::EntryMeta> Cache::collect_entries() const {
     std::vector<EntryMeta> entries;
     std::error_code ec;
@@ -1395,7 +1406,7 @@ std::vector<Cache::EntryMeta> Cache::collect_entries() const {
                 if (std::filesystem::exists(meta_file)) {
                     EntryMeta meta;
                     meta.path = d3.path();
-                    meta.timestamp = std::filesystem::last_write_time(meta_file, ec).time_since_epoch().count();
+                    meta.timestamp = file_time_to_unix_nanos(std::filesystem::last_write_time(meta_file, ec));
                     meta.size_bytes = 0;
                     meta.last_access = meta.timestamp;
                     for (auto& f : std::filesystem::directory_iterator(d3.path(), ec)) {
@@ -1487,33 +1498,43 @@ void Cache::prune(int64_t max_size_bytes, int max_age_days) {
     
     int64_t current_size = 0;
     for (const auto& e : valid_entries) current_size += e.size_bytes;
-    
-    // First, evict entries older than max_age_days
-    for (const auto& e : valid_entries) {
-        if (current_size <= max_size_bytes) break;
-        if (std::chrono::time_point<std::chrono::system_clock, std::chrono::nanoseconds>(std::chrono::nanoseconds(e.last_access)) > cutoff) continue;
-        
-        // Mutex protects us in single-process case; file lock is for inter-process
-        // Skip file lock here since we need to delete the lock file itself
-        std::error_code ec;
-        std::filesystem::remove_all(e.path, ec);
-        if (!ec) {
-            current_size -= e.size_bytes;
-        }
-    }
-    
-    // Then, LRU eviction until we reach target_ratio of max_size_bytes
-    int64_t target_size = static_cast<int64_t>(max_size_bytes * target_ratio);
-    if (current_size > target_size) {
-        for (const auto& e : valid_entries) {
-            if (current_size <= target_size) break;
-            
+
+    // Age-based eviction is a policy of its own: entries older than max_age_days
+    // are removed even when the cache is below its size limit. A non-positive
+    // value disables it.
+    std::vector<bool> evicted(valid_entries.size(), false);
+    if (max_age_days > 0) {
+        for (size_t i = 0; i < valid_entries.size(); ++i) {
+            const auto& e = valid_entries[i];
+            auto last_access = std::chrono::system_clock::time_point(
+                std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                    std::chrono::nanoseconds(e.last_access)));
+            if (last_access > cutoff) continue;
+
             // Mutex protects us in single-process case; file lock is for inter-process
             // Skip file lock here since we need to delete the lock file itself
             std::error_code ec;
             std::filesystem::remove_all(e.path, ec);
             if (!ec) {
                 current_size -= e.size_bytes;
+                evicted[i] = true;
+            }
+        }
+    }
+
+    // Then, LRU eviction until we reach target_ratio of max_size_bytes.
+    // Entries already removed above are skipped so their size is not subtracted twice.
+    int64_t target_size = static_cast<int64_t>(max_size_bytes * target_ratio);
+    if (current_size > target_size) {
+        for (size_t i = 0; i < valid_entries.size() && current_size > target_size; ++i) {
+            if (evicted[i]) continue;
+
+            // Mutex protects us in single-process case; file lock is for inter-process
+            // Skip file lock here since we need to delete the lock file itself
+            std::error_code ec;
+            std::filesystem::remove_all(valid_entries[i].path, ec);
+            if (!ec) {
+                current_size -= valid_entries[i].size_bytes;
             }
         }
     }

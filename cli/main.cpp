@@ -321,6 +321,37 @@ static bool capture_argv(const std::vector<std::string>& args, std::string& out,
 }
 #endif
 
+// Split a makefile-style prerequisite list into paths. Handles the escapes GCC
+// emits in dependency files: "\ " (space), "\\" (backslash) and "\#" (hash).
+// Other backslash sequences (e.g. Windows path separators) are kept verbatim.
+static std::vector<std::string> split_make_deps(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '\\' && i + 1 < s.size()) {
+            char next = s[i + 1];
+            if (next == ' ' || next == '\t' || next == '#' || next == '\\') {
+                cur += next;
+                ++i;
+                continue;
+            }
+            cur += c;
+            continue;
+        }
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (!cur.empty()) {
+                out.push_back(cur);
+                cur.clear();
+            }
+            continue;
+        }
+        cur += c;
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
 // Discover the header files a translation unit depends on by running the
 // compiler in preprocess/parse-only mode. Returns nullopt if discovery could
 // not be performed (in which case the caller must bypass the cache rather than
@@ -379,10 +410,14 @@ static std::optional<std::vector<std::string>> discover_dependencies(
         if (exit_code != 0 && deps.empty()) return std::nullopt;
     } else {
         // makefile-style: "target: dep1 dep2 \", with '\' line continuations.
+        // A trailing backslash continues the line only when it is not itself
+        // escaped (an even number of trailing backslashes is a literal one).
         std::string joined;
         while (std::getline(iss, line)) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (!line.empty() && line.back() == '\\') {
+            size_t trailing = 0;
+            while (trailing < line.size() && line[line.size() - 1 - trailing] == '\\') ++trailing;
+            if (trailing % 2 == 1) {
                 joined += line.substr(0, line.size() - 1);
                 joined += ' ';
             } else {
@@ -394,9 +429,9 @@ static std::optional<std::vector<std::string>> discover_dependencies(
         while (std::getline(js, line)) {
             auto colon = line.find(':');
             if (colon == std::string::npos) continue;
-            std::istringstream ts(line.substr(colon + 1));
-            std::string tok;
-            while (ts >> tok) deps.push_back(tok);
+            for (auto& dep : split_make_deps(line.substr(colon + 1))) {
+                deps.push_back(std::move(dep));
+            }
         }
         if (exit_code != 0) return std::nullopt;
     }

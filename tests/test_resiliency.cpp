@@ -50,6 +50,62 @@ void test_corrupted_cache_entry() {
     fs::remove_all(test_dir);
 }
 
+void test_truncated_zstd_entry() {
+    std::cout << "Testing truncated zstd entry handling...\n";
+#if !REMAKE_HAVE_ZSTD
+    std::cout << "  SKIP: built without zstd\n";
+#else
+    fs::path test_dir = fs::temp_directory_path() / "remake-test-truncated-zstd";
+    if (fs::exists(test_dir)) fs::remove_all(test_dir);
+    fs::create_directories(test_dir);
+
+    skipbuild::Cache cache(test_dir);
+
+    fs::path src = test_dir / "t.cpp";
+    std::ofstream(src) << "int main() { return 0; }";
+
+    std::vector<std::string> includes;
+    std::vector<std::string> flags;
+    auto key = skipbuild::Cache::compute_key(src, includes, flags, "test-compiler");
+
+    fs::path obj = test_dir / "t.o";
+    {
+        std::ofstream o(obj, std::ios::binary);
+        for (int i = 0; i < 512; ++i) o.put(static_cast<char>('A' + (i % 26)));
+    }
+    assert(cache.put(key, {obj}));
+
+    fs::path key_dir = test_dir / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+    fs::path blob;
+    for (auto& f : fs::directory_iterator(key_dir)) {
+        if (f.path().extension() == ".zst") {
+            blob = f.path();
+            break;
+        }
+    }
+    assert(!blob.empty());
+
+    // Drop the tail of the compressed frame: still non-empty, but incomplete.
+    std::vector<char> data;
+    {
+        std::ifstream in(blob, std::ios::binary);
+        data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    assert(data.size() > 8);
+    data.resize(data.size() - 5);
+    {
+        std::ofstream out(blob, std::ios::binary | std::ios::trunc);
+        out.write(data.data(), static_cast<std::streamsize>(data.size()));
+    }
+
+    auto hit = cache.safe_get(key);
+    assert(!hit.has_value());
+    std::cout << "  PASS: Truncated zstd frame rejected\n";
+
+    fs::remove_all(test_dir);
+#endif
+}
+
 void test_cache_put_failure_disk_full_simulation() {
     std::cout << "Testing cache put failure handling (permission denied)...\n";
     
@@ -289,6 +345,9 @@ int main() {
     std::cout << "=== Resiliency & Fail-Safe Fallback Tests ===\n\n";
     
     test_corrupted_cache_entry();
+    std::cout << "\n";
+    
+    test_truncated_zstd_entry();
     std::cout << "\n";
     
     test_cache_put_failure_disk_full_simulation();

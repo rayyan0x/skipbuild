@@ -27,13 +27,24 @@ struct CacheConfig {
     double auto_clear_ratio = 0.95;
     std::filesystem::path cache_dir;
     bool compression_enabled = true;
-    bool read_only = false;
+    bool read_only = false;         // Local cache: read, but never write
+    bool remote_read_only = false;  // Remote cache: download, but never upload
     std::string remote_url;
     int remote_connect_timeout_ms = 3000;
     int remote_read_timeout_ms = 3000;
     int remote_max_retries = 1;
     bool disable_incremental_msbuild = true;  // Auto-disable for MSBuild incremental (output newer than source)
     CompilerCheckMode compiler_check = CompilerCheckMode::Mtime;  // Compiler fingerprinting strategy
+};
+
+// Which optional CLI overrides the caller actually supplied. A default-constructed
+// CacheConfig cannot distinguish an explicit `false` from "not specified", so the
+// CLI reports the flags it saw here; unspecified booleans fall through to the
+// global/project/env values rather than resetting them to the struct defaults.
+struct CliOverrideMask {
+    bool compression_enabled = false;
+    bool read_only = false;
+    bool remote_read_only = false;
 };
 
 class ConfigParser {
@@ -48,7 +59,8 @@ public:
     // Order: defaults < global < project < env < cli
     static CacheConfig load_config(
         const std::filesystem::path& project_root = "",
-        const std::optional<CacheConfig>& cli_overrides = std::nullopt);
+        const std::optional<CacheConfig>& cli_overrides = std::nullopt,
+        const CliOverrideMask& cli_mask = {});
     
     // Find config files in standard locations
     static std::filesystem::path find_global_config();

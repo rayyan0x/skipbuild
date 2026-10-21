@@ -114,6 +114,7 @@ void test_apply_values() {
         {"cache_dir", "/custom/cache"},
         {"compression_enabled", "false"},
         {"read_only", "true"},
+        {"remote_read_only", "true"},
         {"remote_url", "https://cache.example.com"},
         {"remote_connect_timeout_ms", "5000"},
         {"remote_read_timeout_ms", "10000"},
@@ -128,10 +129,17 @@ void test_apply_values() {
     assert(config.cache_dir == "/custom/cache");
     assert(config.compression_enabled == false);
     assert(config.read_only == true);
+    assert(config.remote_read_only == true);
     assert(config.remote_url == "https://cache.example.com");
     assert(config.remote_connect_timeout_ms == 5000);
     assert(config.remote_read_timeout_ms == 10000);
     assert(config.remote_max_retries == 3);
+    
+    // remote_read_only is independent of the local read_only flag
+    skipbuild::CacheConfig remote_only;
+    skipbuild::ConfigParser::apply_values(remote_only, {{"remote_read_only", "true"}});
+    assert(remote_only.remote_read_only == true);
+    assert(remote_only.read_only == false);
     
     std::cout << "  PASS: All values applied correctly\n";
 }
@@ -319,22 +327,62 @@ void test_config_with_cli_overrides() {
     fs::path project_dir = test_dir / "project";
     fs::create_directories(project_dir);
     fs::path project_config = project_dir / ".buildcache.conf";
-    std::ofstream(project_config) << "max_cache_size = 1G\ncompression_enabled = true\nread_only = false\n";
+    std::ofstream(project_config) << "max_cache_size = 1G\ncompression_enabled = false\nread_only = true\n";
     
-    // CLI overrides
+    // CLI overrides (explicitly supplied, so they win)
     skipbuild::CacheConfig cli_override;
     cli_override.max_cache_size_bytes = 5LL * 1024 * 1024 * 1024; // 5G
-    cli_override.compression_enabled = false;
-    cli_override.read_only = true;
-    
-    auto config = skipbuild::ConfigParser::load_config(project_dir, cli_override);
+    cli_override.compression_enabled = true;
+    cli_override.read_only = false;
+
+    skipbuild::CliOverrideMask mask;
+    mask.compression_enabled = true;
+    mask.read_only = true;
+
+    auto config = skipbuild::ConfigParser::load_config(project_dir, cli_override, mask);
     
     assert(config.max_cache_size_bytes == 5LL * 1024 * 1024 * 1024);
-    assert(config.compression_enabled == false);
-    assert(config.read_only == true);
+    assert(config.compression_enabled == true);
+    assert(config.read_only == false);
     
     std::cout << "  PASS: CLI overrides work for all fields\n";
+
+    // A CLI override struct that did NOT pass --compression/--read-only must not
+    // reset the values loaded from the project config to its struct defaults.
+    skipbuild::CacheConfig partial;
+    partial.max_cache_size_bytes = 6LL * 1024 * 1024 * 1024;
+    auto config_partial = skipbuild::ConfigParser::load_config(project_dir, partial, {});
+    assert(config_partial.max_cache_size_bytes == 6LL * 1024 * 1024 * 1024);
+    assert(config_partial.compression_enabled == false);  // from project config
+    assert(config_partial.read_only == true);             // from project config
+
+    std::cout << "  PASS: Unspecified CLI booleans keep config-file values\n";
     
+    fs::remove_all(test_dir);
+}
+
+void test_project_config_upward_search() {
+    std::cout << "Testing upward project config discovery...\n";
+
+    fs::path test_dir = fs::temp_directory_path() / "remake-test-upward-config";
+    if (fs::exists(test_dir)) fs::remove_all(test_dir);
+    fs::path build_dir = test_dir / "build" / "nested";
+    fs::create_directories(build_dir);
+
+    fs::path project_config = test_dir / ".skipbuild.conf";
+    std::ofstream(project_config) << "compression_enabled = false\nread_only = true\n";
+
+    auto found = skipbuild::ConfigParser::find_project_config(build_dir);
+    assert(!found.empty());
+    assert(fs::equivalent(found, project_config));
+    std::cout << "  PASS: Found config in ancestor directory\n";
+
+    // load_config() must pick it up when invoked from a build subdirectory.
+    auto config = skipbuild::ConfigParser::load_config(build_dir, std::nullopt);
+    assert(config.compression_enabled == false);
+    assert(config.read_only == true);
+    std::cout << "  PASS: Ancestor config applied by load_config\n";
+
     fs::remove_all(test_dir);
 }
 
@@ -372,6 +420,9 @@ int main() {
     std::cout << "\n";
     
     test_config_with_cli_overrides();
+    std::cout << "\n";
+    
+    test_project_config_upward_search();
     std::cout << "\n";
     
     std::cout << "=== All tests passed! ===\n";

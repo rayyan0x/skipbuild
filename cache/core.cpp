@@ -17,6 +17,7 @@
 #include <memory>
 #include <cstdint>
 #include <random>
+#include <cctype>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -49,11 +50,23 @@ static bool read_file(const fs::path& path, std::vector<uint8_t>& data) {
 }
 
 static bool write_file(const fs::path& path, const std::vector<uint8_t>& data) {
-    fs::create_directories(path.parent_path());
-    std::ofstream f(path, std::ios::binary);
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    if (ec) return false;
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) return false;
-    f.write(reinterpret_cast<const char*>(data.data()), data.size());
-    return f.good();
+    if (!data.empty()) {
+        f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    }
+    f.flush();
+    bool ok = f.good();
+    f.close();
+    if (!ok || f.fail()) {
+        std::error_code ec2;
+        fs::remove(path, ec2);
+        return false;
+    }
+    return true;
 }
 
 // Reduce a remote-supplied artifact name to a bare filename so that a hostile
@@ -113,7 +126,10 @@ static bool decompress_zstd_bounded(const std::vector<uint8_t>& input, std::vect
         if (output.size() + out.pos > kMaxOutputBytes) break;
         output.insert(output.end(), outbuf.data(), outbuf.data() + out.pos);
         if (ret == 0) { ok = true; break; }                        // frame fully decoded
-        if (out.pos == 0 && in.pos >= in.size) { ok = true; break; } // input exhausted
+        // `ret != 0` means the decoder still needs input for the current frame.
+        // Running out of input here is a truncated frame, not a complete one:
+        // accepting it would restore partially written artifacts.
+        if (in.pos >= in.size) break;
     }
 
     ZSTD_freeDStream(ds);
@@ -462,10 +478,19 @@ static bool compress_file(const std::filesystem::path& input_path, const std::fi
         return false;
     }
     
-    std::ofstream out(output_path, std::ios::binary);
+    std::ofstream out(output_path, std::ios::binary | std::ios::trunc);
     if (!out) return false;
-    out.write(reinterpret_cast<const char*>(compressed.data()), compressed.size());
+    if (!compressed.empty()) {
+        out.write(reinterpret_cast<const char*>(compressed.data()), static_cast<std::streamsize>(compressed.size()));
+    }
+    out.flush();
+    bool ok = out.good();
     out.close();
+    if (!ok || out.fail()) {
+        std::error_code ec;
+        std::filesystem::remove(output_path, ec);
+        return false;
+    }
     return true;
 }
 
@@ -481,10 +506,19 @@ static bool decompress_file(const std::filesystem::path& input_path, const std::
         return false;
     }
     
-    std::ofstream out(output_path, std::ios::binary);
+    std::ofstream out(output_path, std::ios::binary | std::ios::trunc);
     if (!out) return false;
-    out.write(reinterpret_cast<const char*>(decompressed.data()), decompressed.size());
+    if (!decompressed.empty()) {
+        out.write(reinterpret_cast<const char*>(decompressed.data()), static_cast<std::streamsize>(decompressed.size()));
+    }
+    out.flush();
+    bool ok = out.good();
     out.close();
+    if (!ok || out.fail()) {
+        std::error_code ec;
+        std::filesystem::remove(output_path, ec);
+        return false;
+    }
     return true;
 }
 
@@ -528,7 +562,13 @@ static bool write_meta_json(const std::filesystem::path& meta_file, const std::f
     }
     meta << "}";
     meta.flush();
+    bool ok = meta.good();
     meta.close();
+    if (!ok || meta.fail()) {
+        std::error_code ec;
+        std::filesystem::remove(meta_temp, ec);
+        return false;
+    }
     
     return atomic_replace_file(meta_temp, meta_file);
 }
@@ -704,6 +744,10 @@ static std::filesystem::path make_temp_path(const std::filesystem::path& base_di
 
 bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs,
                 const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars) {
+    // Read-only caches may still be read, but must never create or modify
+    // entries (local or remote).
+    if (config_.read_only) return false;
+
     int64_t total_size = 0;
     int64_t max_cache_size = config_.max_cache_size_bytes;
     bool success = false;
@@ -862,7 +906,10 @@ bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& o
     return success;
 }
 
-std::optional<CacheEntry> Cache::safe_get(const CacheKey& key) const {
+namespace { std::filesystem::path make_stage_dir(const std::filesystem::path& fallback_root); }
+
+std::optional<CacheEntry> Cache::safe_get(const CacheKey& key,
+    const std::filesystem::path& expected_output) const {
     // First try local cache
     std::optional<CacheEntry> local_entry;
     try {
@@ -895,64 +942,131 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key) const {
     if (remote_cache_) {
         try {
             auto remote_result = remote_cache_->get(key.hash, key.toolchain_id);
-            if (remote_result.success && !remote_result.primary_data.empty()) {
-                // Create local cache directory for this key
-                fs::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
-                fs::create_directories(key_dir);
-                
-                // Decompress primary artifact
-                std::vector<uint8_t> primary_decompressed;
-                if (!decompress_data(remote_result.primary_data, primary_decompressed)) {
-                    std::cerr << "[build-cache warning] Failed to decompress primary artifact from remote cache.\n";
-                } else {
-                    // Save primary artifact
-                    fs::path primary_path = key_dir / (key.hash + ".obj");
-                    if (write_file(primary_path, primary_decompressed)) {
-                        // Create CacheEntry
-                        CacheEntry entry;
-                        entry.key = key;
-                        entry.timestamp = std::time(nullptr);
-                        entry.size_bytes = primary_decompressed.size();
-                        entry.outputs.push_back(primary_path);
-                        
-                        // Decompress and save sidecars
-                        for (const auto& [name, compressed_data] : remote_result.sidecars) {
-                            auto safe_name = sanitize_remote_name(name);
-                            if (!safe_name) {
-                                std::cerr << "[build-cache warning] Ignoring remote sidecar with unsafe name: " << name << "\n";
-                                continue;
-                            }
-                            std::vector<uint8_t> decompressed;
-                            if (decompress_data(compressed_data, decompressed)) {
-                                fs::path sidecar_path = key_dir / *safe_name;
-                                if (write_file(sidecar_path, decompressed)) {
-                                    SidecarInfo si;
-                                    si.relative_path = sidecar_path;
-                                    si.hash = compute_sha256(decompressed);
-                                    
-                                    // Determine sidecar type from extension
-                                    std::string ext = *safe_name;
-                                    if (ext.size() > 4 && ext.substr(ext.size() - 4) == ".zst") {
-                                        ext = ext.substr(0, ext.size() - 4);
-                                    }
-                                    if (ext.size() > 4 && (ext.substr(ext.size() - 4) == ".pdb" || ext.substr(ext.size() - 4) == ".idb")) {
-                                        si.type = (ext.substr(ext.size() - 4) == ".pdb") ? SidecarType::PDB : SidecarType::IDB;
-                                    } else if (ext.size() > 4 && ext.substr(ext.size() - 4) == ".dwo") {
-                                        si.type = SidecarType::DWO;
-                                    } else {
-                                        si.type = SidecarType::Other;
-                                    }
-                                    
-                                    entry.sidecars.push_back(std::move(si));
-                                    entry.size_bytes += decompressed.size();
-                                }
-                            }
-                        }
-                        
-                        return entry;
-                    }
+            if (!remote_result.success || remote_result.artifacts.empty()) return std::nullopt;
+
+            // Pick the primary output name (first non-sidecar artifact). New
+            // entries carry the real filename; legacy entries store it only by
+            // hash and fall back to the caller's expected output.
+            std::string primary_name;
+            for (const auto& artifact : remote_result.artifacts) {
+                if (!artifact.is_sidecar && !artifact.name.empty()) {
+                    primary_name = artifact.name;
+                    break;
                 }
             }
+            if (primary_name.empty()) primary_name = expected_output.filename().string();
+            if (primary_name.empty()) primary_name = key.hash + ".obj";
+            auto safe_primary = sanitize_remote_name(primary_name);
+            if (!safe_primary) return std::nullopt;
+            primary_name = *safe_primary;
+            const std::string primary_stem = fs::path(primary_name).stem().string();
+
+            fs::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+            std::error_code ec;
+            fs::create_directories(key_dir, ec);
+            if (ec) return std::nullopt;
+
+            // Install into the local cache under the entry's exclusive lock so
+            // concurrent readers see either no entry or the complete one.
+            FileLock file_lock(key_dir / ".lock");
+            FileLock::ScopedLock scoped_lock(file_lock, FileLock::LockType::Exclusive);
+            if (!scoped_lock) return std::nullopt;
+
+            // Another process may have installed the entry while we downloaded.
+            if (fs::exists(key_dir / "meta.json")) {
+                scoped_lock.release();
+                return get(key);
+            }
+
+            fs::path stage_dir = make_stage_dir(root_);
+            if (stage_dir.empty()) return std::nullopt;
+            auto drop_stage = [&stage_dir]() {
+                std::error_code sec;
+                fs::remove_all(stage_dir, sec);
+            };
+
+            CacheEntry entry;
+            entry.key = key;
+            entry.timestamp = std::time(nullptr);
+            entry.size_bytes = 0;
+            std::vector<std::pair<fs::path, SidecarType>> stored_sidecars;
+            std::vector<fs::path> staged_files;
+
+            for (const auto& artifact : remote_result.artifacts) {
+                std::string name = artifact.name;
+                if (name.empty()) name = primary_name;  // legacy primary
+                // Legacy sidecars are named "<hash>.pdb"; rewrite them to the
+                // real "<output stem>.pdb".
+                if (artifact.is_sidecar && name.rfind(key.hash, 0) == 0) {
+                    auto dot = name.rfind('.');
+                    if (dot != std::string::npos) name = primary_stem + name.substr(dot);
+                }
+                auto safe_name = sanitize_remote_name(name);
+                if (!safe_name) continue;
+
+                std::vector<uint8_t> decompressed;
+                if (!decompress_data(artifact.data, decompressed)) {
+                    drop_stage();
+                    return std::nullopt;
+                }
+
+                fs::path staged = stage_dir / *safe_name;
+                if (!write_file(staged, decompressed)) {
+                    drop_stage();
+                    return std::nullopt;
+                }
+
+                // Persist the (already compressed) blob under its canonical name.
+                #if REMAKE_HAVE_ZSTD
+                fs::path dest = key_dir / (*safe_name + ".zst");
+                if (!write_file(dest, artifact.data)) {
+                    drop_stage();
+                    return std::nullopt;
+                }
+                #else
+                fs::path dest = key_dir / *safe_name;
+                if (!write_file(dest, decompressed)) {
+                    drop_stage();
+                    return std::nullopt;
+                }
+                #endif
+
+                entry.size_bytes += static_cast<int64_t>(decompressed.size());
+                staged_files.push_back(staged);
+
+                if (artifact.is_sidecar) {
+                    SidecarInfo si;
+                    si.relative_path = staged;
+                    si.hash = compute_sha256(decompressed);
+                    std::string ext = fs::path(*safe_name).extension().string();
+                    si.type = (ext == ".pdb") ? SidecarType::PDB
+                            : (ext == ".idb") ? SidecarType::IDB
+                            : (ext == ".dwo") ? SidecarType::DWO
+                            : SidecarType::Other;
+                    entry.sidecars.push_back(si);
+                    stored_sidecars.emplace_back(dest, si.type);
+                } else {
+                    entry.outputs.push_back(staged);
+                }
+            }
+
+            if (entry.outputs.empty()) {
+                drop_stage();
+                return std::nullopt;
+            }
+
+            // Write meta.json atomically so later lookups hit the local cache
+            // and collectors/pruners see a complete entry.
+            fs::path meta_file = key_dir / "meta.json";
+            fs::path meta_temp = make_temp_path(key_dir, "meta.json");
+            if (!write_meta_json(meta_file, meta_temp, key.toolchain_id, entry.size_bytes, stored_sidecars)) {
+                drop_stage();
+                return std::nullopt;
+            }
+
+            entry.transient_files = std::move(staged_files);
+            entry.transient_files.push_back(stage_dir);
+            return entry;
         } catch (const std::exception& e) {
             std::cerr << "[build-cache warning] Remote cache read failed: " << e.what() << ". Falling back to native compilation.\n";
         } catch (...) {
@@ -979,40 +1093,48 @@ bool Cache::safe_put(const CacheKey& key, const std::vector<std::filesystem::pat
     }
     
     // Also upload to remote cache if configured and not read-only
-    if (remote_cache_ && !config_.read_only) {
+    if (remote_cache_ && !config_.read_only && !config_.remote_read_only) {
         try {
-            // Compress primary outputs
-            std::vector<uint8_t> primary_data;
+            std::vector<RemoteCache::Artifact> artifacts;
+
+            // Every output (object, PCH, DLL, import library, ...)
             for (const auto& output : outputs) {
                 if (!fs::exists(output)) continue;
+                std::error_code ec;
+                if (fs::file_size(output, ec) == 0) continue;
                 std::vector<uint8_t> file_data;
                 if (!read_file(output, file_data)) continue;
-                
+
                 std::vector<uint8_t> compressed;
-                if (compress_data(file_data, compressed)) {
-                    primary_data = std::move(compressed);
-                    break; // Use first valid output
-                }
+                if (!compress_data(file_data, compressed)) continue;
+
+                RemoteCache::Artifact artifact;
+                artifact.name = output.filename().string();
+                artifact.is_sidecar = false;
+                artifact.data = std::move(compressed);
+                artifacts.push_back(std::move(artifact));
             }
-            
-            // Compress sidecars
-            std::vector<std::pair<std::string, std::vector<uint8_t>>> compressed_sidecars;
+
+            // Debug sidecars travel as named artifacts too, so their original
+            // names survive the round trip.
             for (const auto& [path, type] : sidecars) {
+                (void)type;
                 if (!fs::exists(path)) continue;
                 std::vector<uint8_t> file_data;
                 if (!read_file(path, file_data)) continue;
-                
+
                 std::vector<uint8_t> compressed;
-                if (compress_data(file_data, compressed)) {
-                    // Determine remote filename
-                    std::string ext = path.extension().string();
-                    std::string remote_name = key.hash + ext + ".zst";
-                    compressed_sidecars.emplace_back(remote_name, std::move(compressed));
-                }
+                if (!compress_data(file_data, compressed)) continue;
+
+                RemoteCache::Artifact artifact;
+                artifact.name = path.filename().string();
+                artifact.is_sidecar = true;
+                artifact.data = std::move(compressed);
+                artifacts.push_back(std::move(artifact));
             }
-            
-            if (!primary_data.empty() || !compressed_sidecars.empty()) {
-                remote_cache_->put(key.hash, key.toolchain_id, primary_data, compressed_sidecars);
+
+            if (!artifacts.empty()) {
+                remote_cache_->put(key.hash, key.toolchain_id, artifacts);
             }
         } catch (const std::exception& e) {
             std::cerr << "[build-cache warning] Remote cache write failed: " << e.what() << ". Build output preserved locally.\n";
@@ -1260,6 +1382,17 @@ void Cache::release(const CacheEntry& entry) const {
     }
 }
 
+// std::filesystem::file_time_type uses an implementation-defined epoch (1601 on
+// Windows), so its tick count cannot be compared with system_clock directly.
+// Project it onto the system clock using the current offset between the two.
+static int64_t file_time_to_unix_nanos(std::filesystem::file_time_type ftime) {
+    const auto sys_now = std::chrono::system_clock::now();
+    const auto file_now = std::filesystem::file_time_type::clock::now();
+    const auto delta = std::chrono::duration_cast<std::chrono::system_clock::duration>(ftime - file_now);
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        (sys_now + delta).time_since_epoch()).count();
+}
+
 std::vector<Cache::EntryMeta> Cache::collect_entries() const {
     std::vector<EntryMeta> entries;
     std::error_code ec;
@@ -1273,7 +1406,7 @@ std::vector<Cache::EntryMeta> Cache::collect_entries() const {
                 if (std::filesystem::exists(meta_file)) {
                     EntryMeta meta;
                     meta.path = d3.path();
-                    meta.timestamp = std::filesystem::last_write_time(meta_file, ec).time_since_epoch().count();
+                    meta.timestamp = file_time_to_unix_nanos(std::filesystem::last_write_time(meta_file, ec));
                     meta.size_bytes = 0;
                     meta.last_access = meta.timestamp;
                     for (auto& f : std::filesystem::directory_iterator(d3.path(), ec)) {
@@ -1365,33 +1498,43 @@ void Cache::prune(int64_t max_size_bytes, int max_age_days) {
     
     int64_t current_size = 0;
     for (const auto& e : valid_entries) current_size += e.size_bytes;
-    
-    // First, evict entries older than max_age_days
-    for (const auto& e : valid_entries) {
-        if (current_size <= max_size_bytes) break;
-        if (std::chrono::time_point<std::chrono::system_clock, std::chrono::nanoseconds>(std::chrono::nanoseconds(e.last_access)) > cutoff) continue;
-        
-        // Mutex protects us in single-process case; file lock is for inter-process
-        // Skip file lock here since we need to delete the lock file itself
-        std::error_code ec;
-        std::filesystem::remove_all(e.path, ec);
-        if (!ec) {
-            current_size -= e.size_bytes;
-        }
-    }
-    
-    // Then, LRU eviction until we reach target_ratio of max_size_bytes
-    int64_t target_size = static_cast<int64_t>(max_size_bytes * target_ratio);
-    if (current_size > target_size) {
-        for (const auto& e : valid_entries) {
-            if (current_size <= target_size) break;
-            
+
+    // Age-based eviction is a policy of its own: entries older than max_age_days
+    // are removed even when the cache is below its size limit. A non-positive
+    // value disables it.
+    std::vector<bool> evicted(valid_entries.size(), false);
+    if (max_age_days > 0) {
+        for (size_t i = 0; i < valid_entries.size(); ++i) {
+            const auto& e = valid_entries[i];
+            auto last_access = std::chrono::system_clock::time_point(
+                std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                    std::chrono::nanoseconds(e.last_access)));
+            if (last_access > cutoff) continue;
+
             // Mutex protects us in single-process case; file lock is for inter-process
             // Skip file lock here since we need to delete the lock file itself
             std::error_code ec;
             std::filesystem::remove_all(e.path, ec);
             if (!ec) {
                 current_size -= e.size_bytes;
+                evicted[i] = true;
+            }
+        }
+    }
+
+    // Then, LRU eviction until we reach target_ratio of max_size_bytes.
+    // Entries already removed above are skipped so their size is not subtracted twice.
+    int64_t target_size = static_cast<int64_t>(max_size_bytes * target_ratio);
+    if (current_size > target_size) {
+        for (size_t i = 0; i < valid_entries.size() && current_size > target_size; ++i) {
+            if (evicted[i]) continue;
+
+            // Mutex protects us in single-process case; file lock is for inter-process
+            // Skip file lock here since we need to delete the lock file itself
+            std::error_code ec;
+            std::filesystem::remove_all(valid_entries[i].path, ec);
+            if (!ec) {
+                current_size -= valid_entries[i].size_bytes;
             }
         }
     }
@@ -2799,6 +2942,140 @@ public:
 };
 #endif  // _WIN32
 
+// --- Minimal JSON helpers for the remote meta.json artifact list -------------
+
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    static const char* hex = "0123456789abcdef";
+                    out += "\\u00";
+                    out += hex[(static_cast<unsigned char>(c) >> 4) & 0xF];
+                    out += hex[static_cast<unsigned char>(c) & 0xF];
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
+// Read a JSON string literal starting at/after `pos` (skipping whitespace).
+static std::optional<std::string> json_read_string_at(const std::string& s, size_t pos) {
+    while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\r' || s[pos] == '\n')) ++pos;
+    if (pos >= s.size() || s[pos] != '"') return std::nullopt;
+    ++pos;
+    std::string out;
+    while (pos < s.size()) {
+        char c = s[pos++];
+        if (c == '"') return out;
+        if (c == '\\' && pos < s.size()) {
+            char e = s[pos++];
+            switch (e) {
+                case '"': out += '"'; break;
+                case '\\': out += '\\'; break;
+                case '/': out += '/'; break;
+                case 'n': out += '\n'; break;
+                case 'r': out += '\r'; break;
+                case 't': out += '\t'; break;
+                case 'b': out += '\b'; break;
+                case 'f': out += '\f'; break;
+                case 'u':
+                    // Filenames do not normally use non-ASCII escapes; consume
+                    // the 4 hex digits and keep going rather than failing.
+                    pos += 4;
+                    if (pos > s.size()) pos = s.size();
+                    break;
+                default: out += e; break;
+            }
+            continue;
+        }
+        out += c;
+    }
+    return std::nullopt;
+}
+
+// Find `"key"` followed by `:`; returns the offset just past the colon.
+static bool json_find_key(const std::string& obj, const std::string& key, size_t& out) {
+    std::string pat = "\"" + key + "\"";
+    size_t p = obj.find(pat);
+    if (p == std::string::npos) return false;
+    p = obj.find(':', p + pat.size());
+    if (p == std::string::npos) return false;
+    out = p + 1;
+    return true;
+}
+
+static size_t json_object_end(const std::string& s, size_t start) {
+    bool in_str = false;
+    bool esc = false;
+    for (size_t i = start; i < s.size(); ++i) {
+        char c = s[i];
+        if (in_str) {
+            if (esc) esc = false;
+            else if (c == '\\') esc = true;
+            else if (c == '"') in_str = false;
+        } else if (c == '"') {
+            in_str = true;
+        } else if (c == '}') {
+            return i;
+        }
+    }
+    return std::string::npos;
+}
+
+struct RemoteMetaArtifact {
+    std::string name;
+    std::string file;
+    bool sidecar = false;
+};
+
+static std::vector<RemoteMetaArtifact> parse_meta_artifacts(const std::string& json) {
+    std::vector<RemoteMetaArtifact> out;
+    size_t key_pos = 0;
+    if (!json_find_key(json, "artifacts", key_pos)) return out;
+    size_t arr = json.find('[', key_pos);
+    if (arr == std::string::npos) return out;
+
+    size_t pos = arr + 1;
+    while (pos < json.size()) {
+        while (pos < json.size() &&
+               (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\r' ||
+                json[pos] == '\n' || json[pos] == ',')) {
+            ++pos;
+        }
+        if (pos >= json.size() || json[pos] == ']') break;
+        if (json[pos] != '{') { ++pos; continue; }
+        size_t end = json_object_end(json, pos);
+        if (end == std::string::npos) break;
+        std::string obj = json.substr(pos, end - pos + 1);
+
+        RemoteMetaArtifact a;
+        size_t p;
+        if (json_find_key(obj, "file", p)) {
+            if (auto v = json_read_string_at(obj, p)) a.file = *v;
+        }
+        if (json_find_key(obj, "name", p)) {
+            if (auto v = json_read_string_at(obj, p)) a.name = *v;
+        }
+        if (json_find_key(obj, "sidecar", p)) {
+            while (p < obj.size() && (obj[p] == ' ' || obj[p] == '\t' || obj[p] == '\r' || obj[p] == '\n')) ++p;
+            a.sidecar = (obj.compare(p, 4, "true") == 0);
+        }
+        if (!a.file.empty()) out.push_back(std::move(a));
+        pos = end + 1;
+    }
+    return out;
+}
+
 // RemoteCache::Impl implementation
 struct RemoteCache::Impl {
     Config config_;
@@ -2968,6 +3245,46 @@ RemoteCache::GetResult RemoteCache::get(const std::string& key_hash, const std::
         return result;
     }
     
+    // Current layout: meta.json lists every artifact (original name + server
+    // file), so multiple outputs and sidecars round-trip with their names.
+    std::string meta_body(meta_response.body.begin(), meta_response.body.end());
+    auto artifacts = parse_meta_artifacts(meta_body);
+    if (!artifacts.empty()) {
+        for (const auto& a : artifacts) {
+            auto safe_file = sanitize_remote_name(a.file);
+            if (!safe_file) {
+                result.error = "Unsafe remote artifact name: " + a.file;
+                return result;
+            }
+            auto file_url_opt = parse_url(base_url + "/" + *safe_file);
+            if (!file_url_opt) {
+                result.error = "Invalid file URL";
+                return result;
+            }
+            auto file_response = impl_->with_retries([&]() {
+                return impl_->client_->get(*file_url_opt);
+            });
+            if (!file_response.error.empty() || file_response.status_code < 200 || file_response.status_code >= 300) {
+                // A listed artifact that cannot be downloaded makes the entry
+                // incomplete; refuse it rather than restoring a partial result.
+                impl_->increment_stat(impl_->stats_.errors);
+                result.error = "Artifact not found: " + *safe_file;
+                return result;
+            }
+            Artifact artifact;
+            artifact.name = a.name;
+            artifact.is_sidecar = a.sidecar;
+            artifact.data = std::move(file_response.body);
+            result.artifacts.push_back(std::move(artifact));
+        }
+
+        impl_->increment_stat(impl_->stats_.remote_hits);
+        impl_->increment_stat(impl_->stats_.downloads);
+        result.success = true;
+        return result;
+    }
+
+    // Legacy layout: one hash-named primary plus fixed-name sidecars.
     std::string primary_name = key_hash + ".zst";
     std::string file_url = base_url + "/" + primary_name;
     auto file_url_opt = parse_url(file_url);
@@ -2986,7 +3303,13 @@ RemoteCache::GetResult RemoteCache::get(const std::string& key_hash, const std::
         return result;
     }
     
-    result.primary_data = std::move(file_response.body);
+    {
+        Artifact primary;
+        primary.name = "";  // recovered from the caller's expected output
+        primary.is_sidecar = false;
+        primary.data = std::move(file_response.body);
+        result.artifacts.push_back(std::move(primary));
+    }
     
     std::vector<std::string> sidecar_names = {".pdb", ".idb", ".dwo"};
     for (const auto& ext : sidecar_names) {
@@ -3003,7 +3326,11 @@ RemoteCache::GetResult RemoteCache::get(const std::string& key_hash, const std::
             continue;
         }
         
-        result.sidecars.emplace_back(name, std::move(sc_response.body));
+        Artifact sc;
+        sc.name = key_hash + ext;  // safe_get rewrites this to <output stem><ext>
+        sc.is_sidecar = true;
+        sc.data = std::move(sc_response.body);
+        result.artifacts.push_back(std::move(sc));
     }
     
     impl_->increment_stat(impl_->stats_.remote_hits);
@@ -3013,67 +3340,57 @@ RemoteCache::GetResult RemoteCache::get(const std::string& key_hash, const std::
 }
 
 bool RemoteCache::put(const std::string& key_hash, const std::string& toolchain_id,
-                      const std::vector<uint8_t>& primary_data,
-                      const std::vector<std::pair<std::string, std::vector<uint8_t>>>& sidecars) {
+                      const std::vector<Artifact>& artifacts) {
     if (!impl_->is_configured() || impl_->config_.read_only) return false;
+    if (artifacts.empty()) return false;
     
     std::string base_url = build_object_url(impl_->config_, key_hash, toolchain_id);
     auto base_url_opt = parse_url(base_url);
     if (!base_url_opt) return false;
     
-    bool any_uploaded = false;
-    
-    std::string primary_name = key_hash + ".zst";
-    std::string file_url = base_url + "/" + primary_name;
-    auto file_url_opt = parse_url(file_url);
-    if (!file_url_opt) return false;
-    
-    auto put_response = impl_->with_retries([&]() {
-        return impl_->client_->put(*file_url_opt, primary_data, "application/octet-stream");
-    });
-    
-    if (!put_response.error.empty() || put_response.status_code < 200 || put_response.status_code >= 300) {
-        impl_->increment_stat(impl_->stats_.errors);
-    } else {
-        any_uploaded = true;
-    }
-    
-    for (const auto& [name, data] : sidecars) {
-        std::string sc_url = base_url + "/" + name;
-        auto sc_url_opt = parse_url(sc_url);
-        if (!sc_url_opt) continue;
+    // Upload every artifact first. Only advertise them in meta.json once all
+    // uploads succeeded, so a reader never sees a partial entry.
+    std::string artifacts_json;
+    for (size_t i = 0; i < artifacts.size(); ++i) {
+        const auto& artifact = artifacts[i];
+        std::string file = key_hash + "." + std::to_string(i) + ".zst";
+        auto file_url_opt = parse_url(base_url + "/" + file);
+        if (!file_url_opt) return false;
         
-        auto sc_response = impl_->with_retries([&]() {
-            return impl_->client_->put(*sc_url_opt, data, "application/octet-stream");
+        auto put_response = impl_->with_retries([&]() {
+            return impl_->client_->put(*file_url_opt, artifact.data, "application/octet-stream");
         });
         
-        if (!sc_response.error.empty() || sc_response.status_code < 200 || sc_response.status_code >= 300) {
+        if (!put_response.error.empty() || put_response.status_code < 200 || put_response.status_code >= 300) {
             impl_->increment_stat(impl_->stats_.errors);
-        } else {
-            any_uploaded = true;
-        }
-    }
-    
-    if (any_uploaded) {
-        std::string meta_json = "{\"toolchain\":\"" + toolchain_id + "\",\"ts\":" + std::to_string(std::time(nullptr)) + ",\"compressed\":true}";
-        std::vector<uint8_t> meta_data(meta_json.begin(), meta_json.end());
-        
-        std::string meta_url = base_url + "/meta.json";
-        auto meta_url_opt = parse_url(meta_url);
-        if (meta_url_opt) {
-            auto meta_response = impl_->with_retries([&]() {
-                return impl_->client_->put(*meta_url_opt, meta_data, "application/json");
-            });
-            
-            if (!meta_response.error.empty() || meta_response.status_code < 200 || meta_response.status_code >= 300) {
-                impl_->increment_stat(impl_->stats_.errors);
-            }
+            return false;
         }
         
-        impl_->increment_stat(impl_->stats_.uploads);
+        if (i) artifacts_json += ',';
+        artifacts_json += "{\"name\":\"" + json_escape(artifact.name) +
+                          "\",\"file\":\"" + json_escape(file) +
+                          "\",\"sidecar\":" + (artifact.is_sidecar ? "true" : "false") + "}";
     }
     
-    return any_uploaded;
+    std::string meta_json = "{\"toolchain\":\"" + json_escape(toolchain_id) +
+                            "\",\"ts\":" + std::to_string(std::time(nullptr)) +
+                            ",\"compressed\":true,\"artifacts\":[" + artifacts_json + "]}";
+    std::vector<uint8_t> meta_data(meta_json.begin(), meta_json.end());
+    
+    auto meta_url_opt = parse_url(base_url + "/meta.json");
+    if (!meta_url_opt) return false;
+    
+    auto meta_response = impl_->with_retries([&]() {
+        return impl_->client_->put(*meta_url_opt, meta_data, "application/json");
+    });
+    
+    if (!meta_response.error.empty() || meta_response.status_code < 200 || meta_response.status_code >= 300) {
+        impl_->increment_stat(impl_->stats_.errors);
+        return false;
+    }
+    
+    impl_->increment_stat(impl_->stats_.uploads);
+    return true;
 }
 
 RemoteCache::RemoteStats RemoteCache::get_stats() const {

@@ -40,7 +40,13 @@ StatsTracker::~StatsTracker() {
         file << "  \"max_cache_size_bytes\": " << max_cache_size_bytes_.load(std::memory_order_relaxed) << "\n";
         file << "}\n";
         file.flush();
+        bool ok = file.good();
         file.close();
+        if (!ok || file.fail()) {
+            std::error_code rm_ec;
+            fs::remove(temp_file, rm_ec);
+            return;
+        }
         
         // Atomic rename - use platform-specific approach for robustness
         std::error_code ec;
@@ -125,7 +131,13 @@ void StatsTracker::save_to_file() const {
     file << "  \"max_cache_size_bytes\": " << max_cache_size_bytes_.load(std::memory_order_relaxed) << "\n";
     file << "}\n";
     file.flush();
+    bool ok = file.good();
     file.close();
+    if (!ok || file.fail()) {
+        std::error_code rm_ec;
+        fs::remove(temp_file, rm_ec);
+        return;
+    }
     
     // Atomic rename - use platform-specific approach for robustness
     std::error_code ec;

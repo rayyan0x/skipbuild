@@ -82,6 +82,7 @@ void print_usage(const char* prog) {
     std::cerr << "  cache_dir = /path/to/cache\n";
     std::cerr << "  compression_enabled = true\n";
     std::cerr << "  read_only = false\n";
+    std::cerr << "  remote_read_only = false\n";
     std::cerr << "  remote_url = http://...\n";
     std::cerr << "  disable_incremental_msbuild = true\n";
     std::cerr << "  compiler_check = mtime\n";
@@ -321,6 +322,54 @@ static bool capture_argv(const std::vector<std::string>& args, std::string& out,
 }
 #endif
 
+#ifdef _WIN32
+// MSVC localizes the "/showIncludes" prefix to the system UI language. Force the
+// English (1033) resource language for the dependency probe and restore the
+// caller's value on scope exit, so native compiles keep their usual output.
+struct ScopedVslangEnglish {
+    std::optional<std::string> previous;
+    ScopedVslangEnglish() {
+        if (const char* prev = std::getenv("VSLANG")) previous = std::string(prev);
+        else previous = std::string();
+        _putenv_s("VSLANG", "1033");
+    }
+    ~ScopedVslangEnglish() {
+        _putenv_s("VSLANG", previous->c_str());
+    }
+};
+#endif
+
+// Split a makefile-style prerequisite list into paths. Handles the escapes GCC
+// emits in dependency files: "\ " (space), "\\" (backslash) and "\#" (hash).
+// Other backslash sequences (e.g. Windows path separators) are kept verbatim.
+static std::vector<std::string> split_make_deps(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '\\' && i + 1 < s.size()) {
+            char next = s[i + 1];
+            if (next == ' ' || next == '\t' || next == '#' || next == '\\') {
+                cur += next;
+                ++i;
+                continue;
+            }
+            cur += c;
+            continue;
+        }
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (!cur.empty()) {
+                out.push_back(cur);
+                cur.clear();
+            }
+            continue;
+        }
+        cur += c;
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
 // Discover the header files a translation unit depends on by running the
 // compiler in preprocess/parse-only mode. Returns nullopt if discovery could
 // not be performed (in which case the caller must bypass the cache rather than
@@ -359,6 +408,12 @@ static std::optional<std::vector<std::string>> discover_dependencies(
 
     std::string output;
     int exit_code = 0;
+#ifdef _WIN32
+    // Force English /showIncludes output for MSVC so the prefix below matches
+    // regardless of the installed UI language.
+    std::optional<ScopedVslangEnglish> vslang;
+    if (type == skipbuild::CompilerType::MSVC) vslang.emplace();
+#endif
     if (!capture_argv(dep_args, output, exit_code)) return std::nullopt;
 
     std::vector<std::string> deps;
@@ -379,10 +434,14 @@ static std::optional<std::vector<std::string>> discover_dependencies(
         if (exit_code != 0 && deps.empty()) return std::nullopt;
     } else {
         // makefile-style: "target: dep1 dep2 \", with '\' line continuations.
+        // A trailing backslash continues the line only when it is not itself
+        // escaped (an even number of trailing backslashes is a literal one).
         std::string joined;
         while (std::getline(iss, line)) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (!line.empty() && line.back() == '\\') {
+            size_t trailing = 0;
+            while (trailing < line.size() && line[line.size() - 1 - trailing] == '\\') ++trailing;
+            if (trailing % 2 == 1) {
                 joined += line.substr(0, line.size() - 1);
                 joined += ' ';
             } else {
@@ -394,9 +453,9 @@ static std::optional<std::vector<std::string>> discover_dependencies(
         while (std::getline(js, line)) {
             auto colon = line.find(':');
             if (colon == std::string::npos) continue;
-            std::istringstream ts(line.substr(colon + 1));
-            std::string tok;
-            while (ts >> tok) deps.push_back(tok);
+            for (auto& dep : split_make_deps(line.substr(colon + 1))) {
+                deps.push_back(std::move(dep));
+            }
         }
         if (exit_code != 0) return std::nullopt;
     }
@@ -523,6 +582,7 @@ int main(int argc, char* argv[]) {
     
     // Parse CLI args for config overrides before processing commands
     std::optional<skipbuild::CacheConfig> cli_overrides;
+    skipbuild::CliOverrideMask cli_mask;
     fs::path cli_cache_dir;
     bool cli_compiler_check_set = false;
     skipbuild::CompilerCheckMode cli_compiler_check = skipbuild::CompilerCheckMode::Mtime;
@@ -547,11 +607,13 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--compression" && i + 1 < argc) {
             if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
             cli_overrides->compression_enabled = skipbuild::ConfigParser::parse_bool(argv[++i]);
+            cli_mask.compression_enabled = true;
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--read-only" && i + 1 < argc) {
             if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
             cli_overrides->read_only = skipbuild::ConfigParser::parse_bool(argv[++i]);
+            cli_mask.read_only = true;
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--remote-url" && i + 1 < argc) {
@@ -559,11 +621,11 @@ int main(int argc, char* argv[]) {
             cli_overrides->remote_url = argv[++i];
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
-        } else if (arg == "--remote-read-only" && i + 1 < argc) {
+        } else if (arg == "--remote-read-only") {
             if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
-            cli_overrides->read_only = skipbuild::ConfigParser::parse_bool(argv[++i]);
+            cli_overrides->remote_read_only = true;
+            cli_mask.remote_read_only = true;
             arg_consumed[i] = true;
-            arg_consumed[i-1] = true;
         } else if (arg == "--remote-timeout" && i + 1 < argc) {
             if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
             try { cli_overrides->remote_connect_timeout_ms = std::stoi(argv[++i]); } catch (...) {}
@@ -583,8 +645,13 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // Load config with precedence
-    auto config = skipbuild::ConfigParser::load_config("", cli_overrides);
+    // Load config with precedence. The current directory is used as the project
+    // root so a project-local .skipbuild.conf is discovered (searching upward
+    // from the build directory, where the compiler wrapper usually runs).
+    std::error_code cwd_ec;
+    fs::path project_root = fs::current_path(cwd_ec);
+    if (cwd_ec) project_root.clear();
+    auto config = skipbuild::ConfigParser::load_config(project_root, cli_overrides, cli_mask);
     if (!cli_cache_dir.empty()) {
         config.cache_dir = cli_cache_dir;
     }
@@ -803,7 +870,7 @@ int main(int argc, char* argv[]) {
         skipbuild::log_debug("Linker Key: " + key.hash.substr(0, 16));
         
         // Check cache with safe_get (fail-safe)
-        auto entry = cache.safe_get(key);
+        auto entry = cache.safe_get(key, link_cmd->output);
         if (entry) {
             skipbuild::log_debug("LINKER CACHE HIT");
             std::cout << "[skipbuild] LINK HIT " << key.hash.substr(0, 12) << "\n";
@@ -924,7 +991,7 @@ int main(int argc, char* argv[]) {
     skipbuild::log_debug("Compiler: " + cmd->compiler_path + " (" + cmd->compiler_hash.substr(0, 8) + ")");
     
     // Check cache with safe_get (fail-safe)
-    auto entry = cache.safe_get(key);
+    auto entry = cache.safe_get(key, cmd->output);
     if (entry) {
         skipbuild::log_debug("CACHE HIT");
         std::cout << "[skipbuild] HIT " << key.hash.substr(0, 12) << "\n";

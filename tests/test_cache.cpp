@@ -46,6 +46,25 @@ int main() {
     assert(entry->outputs.size() == 1);
     std::cout << "Cache hit: " << entry->outputs[0] << "\n";
     
+    // Read-only caches can still read, but must not write new entries
+    skipbuild::CacheConfig ro_config;
+    ro_config.read_only = true;
+    skipbuild::Cache ro_cache(test_cache, ro_config);
+
+    auto ro_hit = ro_cache.get(key);
+    assert(ro_hit.has_value());
+    std::cout << "Read-only cache read existing entry\n";
+
+    fs::path src2 = test_cache / "test2.cpp";
+    std::ofstream(src2) << "int main() { return 1; }";
+    auto key2 = skipbuild::Cache::compute_key(src2, includes, flags, compiler);
+    fs::path obj2 = test_cache / "test2.o";
+    std::ofstream(obj2) << "fake object file 2";
+
+    assert(!ro_cache.put(key2, {obj2}));
+    assert(!ro_cache.get(key2).has_value());
+    std::cout << "Read-only cache refused write\n";
+    
     // Cleanup
     fs::remove_all(test_cache);
     

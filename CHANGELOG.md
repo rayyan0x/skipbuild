@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-10-20
+## [0.5.0] - 2026-10-21
+
+### Highlights
+Correctness and cache-integrity release: CLI routing and argument passthrough, order-correct compile/link keys, safe cache reads/writes, enforced read-only modes, upward config discovery, meta-driven remote artifacts, and working max-age + LRU pruning.
 
 ### Added
 - **Automatic cache clear-to-zero.** Once usage reaches `auto_clear_ratio` (default `0.95`) of `max_cache_size_bytes`, `put()` purges every entry and frees the space back to zero instead of waiting for the throttled LRU prune. Configurable via `auto_clear_ratio`/`auto_clear` in the config file or `SKIPBUILD_AUTO_CLEAR_RATIO`/`BUILDCACHE_AUTO_CLEAR_RATIO`; `<= 0` disables it.

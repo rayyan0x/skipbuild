@@ -32,7 +32,7 @@ Both installers download the prebuilt binary from GitHub Releases, **verify its 
 ### Confirm
 
 ```powershell
-skipbuild --version      # -> skipbuild 0.4.0
+skipbuild --version      # -> skipbuild 0.5.0
 ```
 
 > **Terminal already open?** Operating systems apply `PATH` changes only to processes started *afterwards*. If `skipbuild` isn't found:

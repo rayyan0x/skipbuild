@@ -321,6 +321,23 @@ static bool capture_argv(const std::vector<std::string>& args, std::string& out,
 }
 #endif
 
+#ifdef _WIN32
+// MSVC localizes the "/showIncludes" prefix to the system UI language. Force the
+// English (1033) resource language for the dependency probe and restore the
+// caller's value on scope exit, so native compiles keep their usual output.
+struct ScopedVslangEnglish {
+    std::optional<std::string> previous;
+    ScopedVslangEnglish() {
+        if (const char* prev = std::getenv("VSLANG")) previous = std::string(prev);
+        else previous = std::string();
+        _putenv_s("VSLANG", "1033");
+    }
+    ~ScopedVslangEnglish() {
+        _putenv_s("VSLANG", previous->c_str());
+    }
+};
+#endif
+
 // Split a makefile-style prerequisite list into paths. Handles the escapes GCC
 // emits in dependency files: "\ " (space), "\\" (backslash) and "\#" (hash).
 // Other backslash sequences (e.g. Windows path separators) are kept verbatim.
@@ -390,6 +407,12 @@ static std::optional<std::vector<std::string>> discover_dependencies(
 
     std::string output;
     int exit_code = 0;
+#ifdef _WIN32
+    // Force English /showIncludes output for MSVC so the prefix below matches
+    // regardless of the installed UI language.
+    std::optional<ScopedVslangEnglish> vslang;
+    if (type == skipbuild::CompilerType::MSVC) vslang.emplace();
+#endif
     if (!capture_argv(dep_args, output, exit_code)) return std::nullopt;
 
     std::vector<std::string> deps;

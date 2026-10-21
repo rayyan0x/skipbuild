@@ -234,7 +234,13 @@ std::optional<CacheEntry> get(const CacheKey& key) const;
     
     // Safe cache get with automatic fallback on any error
     // Returns nullopt on any error (corrupted entry, IO error, etc.) and logs warning
-    std::optional<CacheEntry> safe_get(const CacheKey& key) const;
+    // Fail-safe lookup: local cache first, then the remote cache. On a remote
+    // hit the artifacts are installed into the local cache (under the entry
+    // lock, with meta.json) and staged for the caller. `expected_output` is the
+    // primary artifact's destination path; its filename is used to rebuild the
+    // original artifact name, which the remote stores only by content hash.
+    std::optional<CacheEntry> safe_get(const CacheKey& key,
+        const std::filesystem::path& expected_output = {}) const;
     
     // Safe cache put - never throws, logs warning on failure, returns false on error
     bool safe_put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs,

@@ -870,7 +870,7 @@ int main(int argc, char* argv[]) {
         skipbuild::log_debug("Linker Key: " + key.hash.substr(0, 16));
         
         // Check cache with safe_get (fail-safe)
-        auto entry = cache.safe_get(key);
+        auto entry = cache.safe_get(key, link_cmd->output);
         if (entry) {
             skipbuild::log_debug("LINKER CACHE HIT");
             std::cout << "[skipbuild] LINK HIT " << key.hash.substr(0, 12) << "\n";
@@ -991,7 +991,7 @@ int main(int argc, char* argv[]) {
     skipbuild::log_debug("Compiler: " + cmd->compiler_path + " (" + cmd->compiler_hash.substr(0, 8) + ")");
     
     // Check cache with safe_get (fail-safe)
-    auto entry = cache.safe_get(key);
+    auto entry = cache.safe_get(key, cmd->output);
     if (entry) {
         skipbuild::log_debug("CACHE HIT");
         std::cout << "[skipbuild] HIT " << key.hash.substr(0, 12) << "\n";

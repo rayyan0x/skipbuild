@@ -866,7 +866,10 @@ bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& o
     return success;
 }
 
-std::optional<CacheEntry> Cache::safe_get(const CacheKey& key) const {
+namespace { std::filesystem::path make_stage_dir(const std::filesystem::path& fallback_root); }
+
+std::optional<CacheEntry> Cache::safe_get(const CacheKey& key,
+    const std::filesystem::path& expected_output) const {
     // First try local cache
     std::optional<CacheEntry> local_entry;
     try {
@@ -899,64 +902,136 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key) const {
     if (remote_cache_) {
         try {
             auto remote_result = remote_cache_->get(key.hash, key.toolchain_id);
-            if (remote_result.success && !remote_result.primary_data.empty()) {
-                // Create local cache directory for this key
-                fs::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
-                fs::create_directories(key_dir);
-                
-                // Decompress primary artifact
-                std::vector<uint8_t> primary_decompressed;
-                if (!decompress_data(remote_result.primary_data, primary_decompressed)) {
-                    std::cerr << "[build-cache warning] Failed to decompress primary artifact from remote cache.\n";
-                } else {
-                    // Save primary artifact
-                    fs::path primary_path = key_dir / (key.hash + ".obj");
-                    if (write_file(primary_path, primary_decompressed)) {
-                        // Create CacheEntry
-                        CacheEntry entry;
-                        entry.key = key;
-                        entry.timestamp = std::time(nullptr);
-                        entry.size_bytes = primary_decompressed.size();
-                        entry.outputs.push_back(primary_path);
-                        
-                        // Decompress and save sidecars
-                        for (const auto& [name, compressed_data] : remote_result.sidecars) {
-                            auto safe_name = sanitize_remote_name(name);
-                            if (!safe_name) {
-                                std::cerr << "[build-cache warning] Ignoring remote sidecar with unsafe name: " << name << "\n";
-                                continue;
-                            }
-                            std::vector<uint8_t> decompressed;
-                            if (decompress_data(compressed_data, decompressed)) {
-                                fs::path sidecar_path = key_dir / *safe_name;
-                                if (write_file(sidecar_path, decompressed)) {
-                                    SidecarInfo si;
-                                    si.relative_path = sidecar_path;
-                                    si.hash = compute_sha256(decompressed);
-                                    
-                                    // Determine sidecar type from extension
-                                    std::string ext = *safe_name;
-                                    if (ext.size() > 4 && ext.substr(ext.size() - 4) == ".zst") {
-                                        ext = ext.substr(0, ext.size() - 4);
-                                    }
-                                    if (ext.size() > 4 && (ext.substr(ext.size() - 4) == ".pdb" || ext.substr(ext.size() - 4) == ".idb")) {
-                                        si.type = (ext.substr(ext.size() - 4) == ".pdb") ? SidecarType::PDB : SidecarType::IDB;
-                                    } else if (ext.size() > 4 && ext.substr(ext.size() - 4) == ".dwo") {
-                                        si.type = SidecarType::DWO;
-                                    } else {
-                                        si.type = SidecarType::Other;
-                                    }
-                                    
-                                    entry.sidecars.push_back(std::move(si));
-                                    entry.size_bytes += decompressed.size();
-                                }
-                            }
-                        }
-                        
-                        return entry;
-                    }
-                }
+            if (!remote_result.success || remote_result.primary_data.empty()) return std::nullopt;
+
+            // Remote objects are stored by content hash, so recover the original
+            // artifact name from the caller's expected output.
+            std::string primary_name = expected_output.filename().string();
+            if (primary_name.empty()) primary_name = key.hash + ".obj";
+            auto safe_primary = sanitize_remote_name(primary_name);
+            if (!safe_primary) return std::nullopt;
+            primary_name = *safe_primary;
+
+            fs::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+            std::error_code ec;
+            fs::create_directories(key_dir, ec);
+            if (ec) return std::nullopt;
+
+            // Install into the local cache under the entry's exclusive lock so
+            // concurrent readers see either no entry or the complete one.
+            FileLock file_lock(key_dir / ".lock");
+            FileLock::ScopedLock scoped_lock(file_lock, FileLock::LockType::Exclusive);
+            if (!scoped_lock) return std::nullopt;
+
+            // Another process may have installed the entry while we downloaded.
+            if (fs::exists(key_dir / "meta.json")) {
+                scoped_lock.release();
+                return get(key);
             }
+
+            fs::path stage_dir = make_stage_dir(root_);
+            if (stage_dir.empty()) return std::nullopt;
+            auto drop_stage = [&stage_dir]() {
+                std::error_code sec;
+                fs::remove_all(stage_dir, sec);
+            };
+
+            std::vector<uint8_t> primary_decompressed;
+            if (!decompress_data(remote_result.primary_data, primary_decompressed)) {
+                drop_stage();
+                return std::nullopt;
+            }
+
+            fs::path primary_stage = stage_dir / primary_name;
+            if (!write_file(primary_stage, primary_decompressed)) {
+                drop_stage();
+                return std::nullopt;
+            }
+
+            // Persist the (already compressed) blob under its canonical name.
+            #if REMAKE_HAVE_ZSTD
+            fs::path primary_dest = key_dir / (primary_name + ".zst");
+            if (!write_file(primary_dest, remote_result.primary_data)) {
+                drop_stage();
+                return std::nullopt;
+            }
+            #else
+            fs::path primary_dest = key_dir / primary_name;
+            if (!write_file(primary_dest, primary_decompressed)) {
+                drop_stage();
+                return std::nullopt;
+            }
+            #endif
+
+            std::vector<std::pair<fs::path, SidecarType>> stored_sidecars;
+            std::vector<SidecarInfo> staged_sidecars;
+            int64_t total_size = static_cast<int64_t>(primary_decompressed.size());
+            fs::path primary_stem = fs::path(primary_name).stem();
+
+            for (const auto& [name, compressed_data] : remote_result.sidecars) {
+                // Remote names look like "<hash>.pdb.zst"; rebuild the sidecar
+                // name from the primary output stem ("<output stem>.pdb").
+                std::string bare = name;
+                if (bare.size() > 4 && bare.compare(bare.size() - 4, 4, ".zst") == 0) {
+                    bare.resize(bare.size() - 4);
+                }
+                auto dot = bare.rfind('.');
+                if (dot == std::string::npos) continue;
+                std::string ext = bare.substr(dot);
+                SidecarType type;
+                if (ext == ".pdb") type = SidecarType::PDB;
+                else if (ext == ".idb") type = SidecarType::IDB;
+                else if (ext == ".dwo") type = SidecarType::DWO;
+                else continue;
+
+                auto safe_sc = sanitize_remote_name(primary_stem.string() + ext);
+                if (!safe_sc) continue;
+
+                std::vector<uint8_t> decompressed;
+                if (!decompress_data(compressed_data, decompressed)) continue;
+
+                #if REMAKE_HAVE_ZSTD
+                fs::path sc_dest = key_dir / (*safe_sc + ".zst");
+                if (!write_file(sc_dest, compressed_data)) continue;
+                #else
+                fs::path sc_dest = key_dir / *safe_sc;
+                if (!write_file(sc_dest, decompressed)) continue;
+                #endif
+
+                fs::path sc_stage = stage_dir / *safe_sc;
+                if (!write_file(sc_stage, decompressed)) continue;
+
+                SidecarInfo si;
+                si.relative_path = sc_stage;
+                si.hash = compute_sha256(decompressed);
+                si.type = type;
+                staged_sidecars.push_back(si);
+                stored_sidecars.emplace_back(sc_dest, type);
+                total_size += static_cast<int64_t>(decompressed.size());
+            }
+
+            // Write meta.json atomically so later lookups hit the local cache
+            // and collectors/pruners see a complete entry.
+            fs::path meta_file = key_dir / "meta.json";
+            fs::path meta_temp = make_temp_path(key_dir, "meta.json");
+            if (!write_meta_json(meta_file, meta_temp, key.toolchain_id, total_size, stored_sidecars)) {
+                drop_stage();
+                return std::nullopt;
+            }
+
+            CacheEntry entry;
+            entry.key = key;
+            entry.timestamp = std::time(nullptr);
+            entry.size_bytes = total_size;
+            entry.outputs.push_back(primary_stage);
+            entry.sidecars = std::move(staged_sidecars);
+            // release() deletes everything this process materialised.
+            entry.transient_files.push_back(primary_stage);
+            for (const auto& si : entry.sidecars) {
+                entry.transient_files.push_back(si.relative_path);
+            }
+            entry.transient_files.push_back(stage_dir);
+            return entry;
         } catch (const std::exception& e) {
             std::cerr << "[build-cache warning] Remote cache read failed: " << e.what() << ". Falling back to native compilation.\n";
         } catch (...) {

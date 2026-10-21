@@ -114,6 +114,7 @@ void test_apply_values() {
         {"cache_dir", "/custom/cache"},
         {"compression_enabled", "false"},
         {"read_only", "true"},
+        {"remote_read_only", "true"},
         {"remote_url", "https://cache.example.com"},
         {"remote_connect_timeout_ms", "5000"},
         {"remote_read_timeout_ms", "10000"},
@@ -128,10 +129,17 @@ void test_apply_values() {
     assert(config.cache_dir == "/custom/cache");
     assert(config.compression_enabled == false);
     assert(config.read_only == true);
+    assert(config.remote_read_only == true);
     assert(config.remote_url == "https://cache.example.com");
     assert(config.remote_connect_timeout_ms == 5000);
     assert(config.remote_read_timeout_ms == 10000);
     assert(config.remote_max_retries == 3);
+    
+    // remote_read_only is independent of the local read_only flag
+    skipbuild::CacheConfig remote_only;
+    skipbuild::ConfigParser::apply_values(remote_only, {{"remote_read_only", "true"}});
+    assert(remote_only.remote_read_only == true);
+    assert(remote_only.read_only == false);
     
     std::cout << "  PASS: All values applied correctly\n";
 }

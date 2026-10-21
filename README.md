@@ -357,6 +357,7 @@ export SKIPBUILD_COMPILER_CHECK=content
 | Eviction ratio | — | `SKIPBUILD_EVICTION_RATIO` | `eviction_ratio` | `0.85` |
 | Compression | `--compression <bool>` | `SKIPBUILD_COMPRESSION` | `compression_enabled` | `true` |
 | Read-only | `--read-only <bool>` | `SKIPBUILD_READ_ONLY` | `read_only` | `false` |
+| Remote read-only | `--remote-read-only` | `SKIPBUILD_REMOTE_READ_ONLY` | `remote_read_only` | `false` |
 | Remote URL | — | `SKIPBUILD_REMOTE_URL` | `remote_url` | — |
 | Remote connect timeout (ms) | — | `SKIPBUILD_REMOTE_CONNECT_TIMEOUT` | `remote_connect_timeout` | `3000` |
 | Remote read timeout (ms) | — | `SKIPBUILD_REMOTE_READ_TIMEOUT` | `remote_read_timeout` | `3000` |
@@ -373,8 +374,8 @@ export SKIPBUILD_COMPILER_CHECK=content
 
 **Config file locations (priority order):**
 1. `SKIPBUILD_CONFIG` env var (or legacy `BUILDCACHE_CONFIG`)
-2. `.skipbuild.conf` (project root; legacy `.buildcache.conf` also read)
-3. `.skipbuild/config` (project root; legacy `.buildcache/config` also read)
+2. `.skipbuild.conf` (nearest one found from the working directory upward; legacy `.buildcache.conf` also read)
+3. `.skipbuild/config` (same search; legacy `.buildcache/config` also read)
 4. Windows: `%APPDATA%\skipbuild\config` / `%USERPROFILE%\.skipbuild\config`
 5. Unix: `~/.config/skipbuild/config` / `~/.skipbuild/config`
 

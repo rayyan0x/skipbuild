@@ -154,6 +154,8 @@ void ConfigParser::apply_values(CacheConfig& config, const std::map<std::string,
             config.compression_enabled = parse_bool(value);
         } else if (lower_key == "read_only" || lower_key == "readonly") {
             config.read_only = parse_bool(value);
+        } else if (lower_key == "remote_read_only" || lower_key == "remote_readonly") {
+            config.remote_read_only = parse_bool(value);
         } else if (lower_key == "remote_url" || lower_key == "remote") {
             config.remote_url = value;
         } else if (lower_key == "remote_connect_timeout_ms" || lower_key == "connect_timeout") {
@@ -325,6 +327,10 @@ CacheConfig ConfigParser::load_config(
         config.read_only = parse_bool(env);
     }
     
+    if (const char* env = get_env("SKIPBUILD_REMOTE_READ_ONLY", "BUILDCACHE_REMOTE_READ_ONLY")) {
+        config.remote_read_only = parse_bool(env);
+    }
+    
     if (const char* env = get_env("SKIPBUILD_REMOTE_URL", "BUILDCACHE_REMOTE_URL")) {
         config.remote_url = env;
     }
@@ -360,6 +366,7 @@ CacheConfig ConfigParser::load_config(
         // otherwise the value resolved from global/project/env config is kept.
         if (cli_mask.compression_enabled) config.compression_enabled = cli_overrides->compression_enabled;
         if (cli_mask.read_only) config.read_only = cli_overrides->read_only;
+        if (cli_mask.remote_read_only) config.remote_read_only = cli_overrides->remote_read_only;
         if (cli_overrides->remote_connect_timeout_ms > 0) config.remote_connect_timeout_ms = cli_overrides->remote_connect_timeout_ms;
         if (cli_overrides->remote_read_timeout_ms > 0) config.remote_read_timeout_ms = cli_overrides->remote_read_timeout_ms;
         if (cli_overrides->remote_max_retries >= 0) config.remote_max_retries = cli_overrides->remote_max_retries;

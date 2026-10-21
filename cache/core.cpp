@@ -1058,7 +1058,7 @@ bool Cache::safe_put(const CacheKey& key, const std::vector<std::filesystem::pat
     }
     
     // Also upload to remote cache if configured and not read-only
-    if (remote_cache_ && !config_.read_only) {
+    if (remote_cache_ && !config_.read_only && !config_.remote_read_only) {
         try {
             // Compress primary outputs
             std::vector<uint8_t> primary_data;

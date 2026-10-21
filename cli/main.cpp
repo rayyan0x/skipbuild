@@ -82,6 +82,7 @@ void print_usage(const char* prog) {
     std::cerr << "  cache_dir = /path/to/cache\n";
     std::cerr << "  compression_enabled = true\n";
     std::cerr << "  read_only = false\n";
+    std::cerr << "  remote_read_only = false\n";
     std::cerr << "  remote_url = http://...\n";
     std::cerr << "  disable_incremental_msbuild = true\n";
     std::cerr << "  compiler_check = mtime\n";
@@ -620,12 +621,11 @@ int main(int argc, char* argv[]) {
             cli_overrides->remote_url = argv[++i];
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
-        } else if (arg == "--remote-read-only" && i + 1 < argc) {
+        } else if (arg == "--remote-read-only") {
             if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
-            cli_overrides->read_only = skipbuild::ConfigParser::parse_bool(argv[++i]);
-            cli_mask.read_only = true;
+            cli_overrides->remote_read_only = true;
+            cli_mask.remote_read_only = true;
             arg_consumed[i] = true;
-            arg_consumed[i-1] = true;
         } else if (arg == "--remote-timeout" && i + 1 < argc) {
             if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
             try { cli_overrides->remote_connect_timeout_ms = std::stoi(argv[++i]); } catch (...) {}

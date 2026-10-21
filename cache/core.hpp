@@ -194,7 +194,7 @@ public:
         if (!config_.remote_url.empty()) {
             RemoteCache::Config remote_config = RemoteCache::from_env();
             remote_config.url = config_.remote_url;
-            remote_config.read_only = config_.read_only;
+            remote_config.read_only = config_.read_only || config_.remote_read_only || remote_config.read_only;
             remote_config.connect_timeout_ms = config_.remote_connect_timeout_ms;
             remote_config.read_timeout_ms = config_.remote_read_timeout_ms;
             remote_config.max_retries = config_.remote_max_retries;

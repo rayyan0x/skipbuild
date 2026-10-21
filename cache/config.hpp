@@ -27,7 +27,8 @@ struct CacheConfig {
     double auto_clear_ratio = 0.95;
     std::filesystem::path cache_dir;
     bool compression_enabled = true;
-    bool read_only = false;
+    bool read_only = false;         // Local cache: read, but never write
+    bool remote_read_only = false;  // Remote cache: download, but never upload
     std::string remote_url;
     int remote_connect_timeout_ms = 3000;
     int remote_read_timeout_ms = 3000;
@@ -43,6 +44,7 @@ struct CacheConfig {
 struct CliOverrideMask {
     bool compression_enabled = false;
     bool read_only = false;
+    bool remote_read_only = false;
 };
 
 class ConfigParser {

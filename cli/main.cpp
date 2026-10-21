@@ -523,6 +523,7 @@ int main(int argc, char* argv[]) {
     
     // Parse CLI args for config overrides before processing commands
     std::optional<skipbuild::CacheConfig> cli_overrides;
+    skipbuild::CliOverrideMask cli_mask;
     fs::path cli_cache_dir;
     bool cli_compiler_check_set = false;
     skipbuild::CompilerCheckMode cli_compiler_check = skipbuild::CompilerCheckMode::Mtime;
@@ -547,11 +548,13 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--compression" && i + 1 < argc) {
             if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
             cli_overrides->compression_enabled = skipbuild::ConfigParser::parse_bool(argv[++i]);
+            cli_mask.compression_enabled = true;
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--read-only" && i + 1 < argc) {
             if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
             cli_overrides->read_only = skipbuild::ConfigParser::parse_bool(argv[++i]);
+            cli_mask.read_only = true;
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--remote-url" && i + 1 < argc) {
@@ -562,6 +565,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--remote-read-only" && i + 1 < argc) {
             if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
             cli_overrides->read_only = skipbuild::ConfigParser::parse_bool(argv[++i]);
+            cli_mask.read_only = true;
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--remote-timeout" && i + 1 < argc) {
@@ -583,8 +587,13 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // Load config with precedence
-    auto config = skipbuild::ConfigParser::load_config("", cli_overrides);
+    // Load config with precedence. The current directory is used as the project
+    // root so a project-local .skipbuild.conf is discovered (searching upward
+    // from the build directory, where the compiler wrapper usually runs).
+    std::error_code cwd_ec;
+    fs::path project_root = fs::current_path(cwd_ec);
+    if (cwd_ec) project_root.clear();
+    auto config = skipbuild::ConfigParser::load_config(project_root, cli_overrides, cli_mask);
     if (!cli_cache_dir.empty()) {
         config.cache_dir = cli_cache_dir;
     }

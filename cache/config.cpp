@@ -233,27 +233,42 @@ fs::path ConfigParser::find_global_config() {
 
 fs::path ConfigParser::find_project_config(const fs::path& project_root) {
     if (project_root.empty()) return "";
-    
-    fs::path root = fs::weakly_canonical(project_root);
-    
-    // Preferred: .skipbuild.conf / .skipbuild/config
-    fs::path p = root / ".skipbuild.conf";
-    if (fs::exists(p)) return p;
-    p = root / ".skipbuild" / "config";
-    if (fs::exists(p)) return p;
-    
-    // Legacy: .buildcache.conf / .buildcache/config
-    p = root / ".buildcache.conf";
-    if (fs::exists(p)) return p;
-    p = root / ".buildcache" / "config";
-    if (fs::exists(p)) return p;
-    
+
+    std::error_code ec;
+    fs::path dir = fs::weakly_canonical(project_root, ec);
+    if (ec) {
+        ec.clear();
+        dir = fs::absolute(project_root, ec);
+        if (ec) dir = project_root;
+    }
+
+    // Walk the directory and its ancestors so a project config at the source
+    // root is still found when the cache is invoked from a build subdirectory.
+    while (!dir.empty()) {
+        // Preferred: .skipbuild.conf / .skipbuild/config
+        fs::path p = dir / ".skipbuild.conf";
+        if (fs::exists(p)) return p;
+        p = dir / ".skipbuild" / "config";
+        if (fs::exists(p)) return p;
+
+        // Legacy: .buildcache.conf / .buildcache/config
+        p = dir / ".buildcache.conf";
+        if (fs::exists(p)) return p;
+        p = dir / ".buildcache" / "config";
+        if (fs::exists(p)) return p;
+
+        fs::path parent = dir.parent_path();
+        if (parent == dir) break;  // reached the filesystem root
+        dir = parent;
+    }
+
     return "";
 }
 
 CacheConfig ConfigParser::load_config(
     const fs::path& project_root,
-    const std::optional<CacheConfig>& cli_overrides) {
+    const std::optional<CacheConfig>& cli_overrides,
+    const CliOverrideMask& cli_mask) {
     
     CacheConfig config;
     
@@ -341,8 +356,10 @@ CacheConfig ConfigParser::load_config(
         if (cli_overrides->eviction_target_ratio > 0) config.eviction_target_ratio = cli_overrides->eviction_target_ratio;
         if (!cli_overrides->cache_dir.empty()) config.cache_dir = cli_overrides->cache_dir;
         if (!cli_overrides->remote_url.empty()) config.remote_url = cli_overrides->remote_url;
-        config.compression_enabled = cli_overrides->compression_enabled;
-        config.read_only = cli_overrides->read_only;
+        // Booleans are only applied when the CLI actually passed the flag;
+        // otherwise the value resolved from global/project/env config is kept.
+        if (cli_mask.compression_enabled) config.compression_enabled = cli_overrides->compression_enabled;
+        if (cli_mask.read_only) config.read_only = cli_overrides->read_only;
         if (cli_overrides->remote_connect_timeout_ms > 0) config.remote_connect_timeout_ms = cli_overrides->remote_connect_timeout_ms;
         if (cli_overrides->remote_read_timeout_ms > 0) config.remote_read_timeout_ms = cli_overrides->remote_read_timeout_ms;
         if (cli_overrides->remote_max_retries >= 0) config.remote_max_retries = cli_overrides->remote_max_retries;

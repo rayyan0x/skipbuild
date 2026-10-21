@@ -36,6 +36,15 @@ struct CacheConfig {
     CompilerCheckMode compiler_check = CompilerCheckMode::Mtime;  // Compiler fingerprinting strategy
 };
 
+// Which optional CLI overrides the caller actually supplied. A default-constructed
+// CacheConfig cannot distinguish an explicit `false` from "not specified", so the
+// CLI reports the flags it saw here; unspecified booleans fall through to the
+// global/project/env values rather than resetting them to the struct defaults.
+struct CliOverrideMask {
+    bool compression_enabled = false;
+    bool read_only = false;
+};
+
 class ConfigParser {
 public:
     // Parse a config file and return a map of key-value pairs
@@ -48,7 +57,8 @@ public:
     // Order: defaults < global < project < env < cli
     static CacheConfig load_config(
         const std::filesystem::path& project_root = "",
-        const std::optional<CacheConfig>& cli_overrides = std::nullopt);
+        const std::optional<CacheConfig>& cli_overrides = std::nullopt,
+        const CliOverrideMask& cli_mask = {});
     
     // Find config files in standard locations
     static std::filesystem::path find_global_config();

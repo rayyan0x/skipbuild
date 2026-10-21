@@ -704,6 +704,10 @@ static std::filesystem::path make_temp_path(const std::filesystem::path& base_di
 
 bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs,
                 const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars) {
+    // Read-only caches may still be read, but must never create or modify
+    // entries (local or remote).
+    if (config_.read_only) return false;
+
     int64_t total_size = 0;
     int64_t max_cache_size = config_.max_cache_size_bytes;
     bool success = false;

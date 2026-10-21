@@ -114,7 +114,10 @@ static bool decompress_zstd_bounded(const std::vector<uint8_t>& input, std::vect
         if (output.size() + out.pos > kMaxOutputBytes) break;
         output.insert(output.end(), outbuf.data(), outbuf.data() + out.pos);
         if (ret == 0) { ok = true; break; }                        // frame fully decoded
-        if (out.pos == 0 && in.pos >= in.size) { ok = true; break; } // input exhausted
+        // `ret != 0` means the decoder still needs input for the current frame.
+        // Running out of input here is a truncated frame, not a complete one:
+        // accepting it would restore partially written artifacts.
+        if (in.pos >= in.size) break;
     }
 
     ZSTD_freeDStream(ds);

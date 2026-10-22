@@ -837,6 +837,20 @@ bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& o
         std::filesystem::create_directories(key_dir, ec);
         if (ec) return false;
 
+        bool had_valid_entry = std::filesystem::exists(key_dir / "meta.json");
+
+        // A failed store must not leave a half-written entry behind: without
+        // meta.json the directory is unusable, and with stale blobs left over it
+        // may confuse later attempts. Remove what we created when the entry did
+        // not already exist; an existing valid entry stays intact.
+        auto fail = [&]() {
+            if (!had_valid_entry) {
+                std::error_code cleanup_ec;
+                std::filesystem::remove_all(key_dir, cleanup_ec);
+            }
+            return false;
+        };
+
         std::vector<MetaSidecar> stored_sidecars;
 
         // Compression is a documented user-facing option; honour it at runtime
@@ -855,17 +869,20 @@ bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& o
             std::filesystem::path dest;
             std::string stored_name = output.filename().string() + (use_compression ? ".zst" : "");
             if (!store_cache_file(output, key_dir, stored_name, use_compression, dest, total_size)) {
-                return false;
+                return fail();
             }
         }
 
         for (const auto& [sidecar_path, sidecar_type] : sidecars) {
             if (!std::filesystem::exists(sidecar_path)) continue;
+            // Some toolchains create empty placeholder sidecars; storing and
+            // advertising them is useless and makes restore report empty files.
+            if (std::filesystem::file_size(sidecar_path, ec) == 0) continue;
 
             std::filesystem::path dest;
             std::string stored_name = sidecar_path.filename().string() + (use_compression ? ".zst" : "");
             if (!store_cache_file(sidecar_path, key_dir, stored_name, use_compression, dest, total_size)) {
-                return false;
+                return fail();
             }
 
             stored_sidecars.push_back({sidecar_path.filename().string(), sidecar_type, compute_file_hash(sidecar_path)});
@@ -875,7 +892,7 @@ bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& o
         std::filesystem::path meta_file = key_dir / "meta.json";
         std::filesystem::path meta_temp = make_temp_path(key_dir, "meta");
         if (!write_meta_json(meta_file, meta_temp, key.toolchain_id, total_size, use_compression, stored_sidecars)) {
-            return false;
+            return fail();
         }
         
         success = true;
@@ -2568,6 +2585,11 @@ static std::wstring to_wide(const std::string& s) {
 
 // WinHTTP client
 
+// Hard cap on an HTTP response body buffered in memory. Cache artifacts are
+// compiled outputs; a malicious or broken server must not be able to exhaust
+// the client's RAM by streaming an unbounded response.
+static constexpr size_t kMaxHttpResponseBytes = static_cast<size_t>(512) * 1024 * 1024;
+
 class WinHttpClient {
     WinHttpHandle session_;
     std::wstring user_agent_ = L"remake/" SKIPBUILD_WVERSION;
@@ -2682,7 +2704,12 @@ public:
             bytes_available = 0;
             if (!WinHttpQueryDataAvailable(request, &bytes_available)) break;
             if (bytes_available == 0) break;
-            
+
+            if (buffer.size() + static_cast<size_t>(bytes_available) > kMaxHttpResponseBytes) {
+                response.error = "Response exceeds the maximum allowed size (512 MiB)";
+                return response;
+            }
+
             size_t offset = buffer.size();
             buffer.resize(offset + bytes_available);
             DWORD bytes_read = 0;
@@ -2792,17 +2819,25 @@ class PosixHttpClient {
         return true;
     }
     
-    // Receive data until connection closes or timeout
-    std::vector<uint8_t> receive_all() {
-        std::vector<uint8_t> buffer;
+    // Receive data until connection closes, error, or the response exceeds the cap.
+    bool receive_all(std::vector<uint8_t>& buffer, std::string& error) {
         char temp[4096];
         
         while (true) {
             ssize_t received = recv(socket_fd_, temp, sizeof(temp), 0);
-            if (received <= 0) break;
+            if (received == 0) break;  // orderly shutdown
+            if (received < 0) {
+                if (errno == EINTR) continue;
+                error = "Failed to receive response";
+                return false;
+            }
+            if (buffer.size() + static_cast<size_t>(received) > kMaxHttpResponseBytes) {
+                error = "Response exceeds the maximum allowed size (512 MiB)";
+                return false;
+            }
             buffer.insert(buffer.end(), temp, temp + received);
         }
-        return buffer;
+        return true;
     }
     
     // Parse HTTP response
@@ -2933,10 +2968,17 @@ public:
         }
         
         // Receive response
-        std::vector<uint8_t> raw_response = receive_all();
+        std::vector<uint8_t> raw_response;
+        std::string receive_error;
+        bool received_ok = receive_all(raw_response, receive_error);
         close(socket_fd_);
         socket_fd_ = -1;
-        
+
+        if (!received_ok) {
+            response.error = receive_error;
+            return response;
+        }
+
         if (raw_response.empty()) {
             response.error = "Empty response from server";
             return response;
@@ -3055,6 +3097,7 @@ static size_t json_object_end(const std::string& s, size_t start) {
 struct RemoteMetaArtifact {
     std::string name;
     std::string file;
+    std::string sha256;  // hex digest of the uploaded (compressed) bytes; empty in legacy entries
     bool sidecar = false;
 };
 
@@ -3085,6 +3128,9 @@ static std::vector<RemoteMetaArtifact> parse_meta_artifacts(const std::string& j
         }
         if (json_find_key(obj, "name", p)) {
             if (auto v = json_read_string_at(obj, p)) a.name = *v;
+        }
+        if (json_find_key(obj, "sha256", p)) {
+            if (auto v = json_read_string_at(obj, p)) a.sha256 = *v;
         }
         if (json_find_key(obj, "sidecar", p)) {
             while (p < obj.size() && (obj[p] == ' ' || obj[p] == '\t' || obj[p] == '\r' || obj[p] == '\n')) ++p;
@@ -3302,6 +3348,13 @@ RemoteCache::GetResult RemoteCache::get(const std::string& key_hash, const std::
                 result.error = "Artifact not found: " + *safe_file;
                 return result;
             }
+            // Verify the transport did not truncate or corrupt the artifact.
+            // Entries written before checksums existed are accepted as-is.
+            if (!a.sha256.empty() && compute_sha256(file_response.body) != a.sha256) {
+                impl_->increment_stat(impl_->stats_.errors);
+                result.error = "Artifact checksum mismatch: " + *safe_file;
+                return result;
+            }
             Artifact artifact;
             artifact.name = a.name;
             artifact.is_sidecar = a.sidecar;
@@ -3400,6 +3453,7 @@ bool RemoteCache::put(const std::string& key_hash, const std::string& toolchain_
         if (i) artifacts_json += ',';
         artifacts_json += "{\"name\":\"" + json_escape(artifact.name) +
                           "\",\"file\":\"" + json_escape(file) +
+                          "\",\"sha256\":\"" + compute_sha256(artifact.data) +
                           "\",\"sidecar\":" + (artifact.is_sidecar ? "true" : "false") + "}";
     }
     

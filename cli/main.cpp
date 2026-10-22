@@ -635,6 +635,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--disable-incremental-msbuild" && i + 1 < argc) {
             if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
             cli_overrides->disable_incremental_msbuild = skipbuild::ConfigParser::parse_bool(argv[++i]);
+            cli_mask.disable_incremental_msbuild = true;
             arg_consumed[i] = true;
             arg_consumed[i-1] = true;
         } else if (arg == "--compiler-check" && i + 1 < argc) {

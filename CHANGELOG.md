@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **HTTP responses are bounded.** Both clients buffered the whole body with no limit, so a broken or hostile server could exhaust the build machine's memory; bodies are now capped at 512 MiB and oversized responses fail the request. The POSIX client also reports a receive error/timeout instead of silently restoring a truncated body.
+- **Remote artifacts are checksum-verified.** `meta.json` now records a SHA-256 of each uploaded artifact and downloads whose bytes do not match are rejected (legacy entries without checksums remain readable), so truncation or corruption cannot install a bad entry.
+- **`--disable-incremental-msbuild` actually applies.** The CLI flag populated the override struct but no mask bit existed and `load_config()` never read the value, so passing it had no effect; it now overrides `disable_incremental_msbuild` like the other booleans.
+- **Empty sidecars are not cached.** Zero-byte `.pdb`/`.idb`/`.dwo` placeholders were stored and advertised, making restores report an empty symbol file; they are now skipped on store.
+- **Failed stores leave no partial entry.** A failure while writing blobs or `meta.json` used to leave an unusable directory (and stale blobs) at the key path; when the entry did not already exist, everything created by the failed store is now removed.
+
 ## [0.6.0] - 2026-10-22
 
 ### Highlights

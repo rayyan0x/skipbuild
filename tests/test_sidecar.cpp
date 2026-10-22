@@ -173,6 +173,32 @@ int main() {
     raw_cache.release(*raw_entry);
     std::cout << "PASS: compression_enabled=false stores and reads raw artifacts\n";
     std::cout.flush();
+
+    // Empty sidecars (placeholder files some toolchains emit) must not be
+    // stored or advertised; otherwise a restore reports a bogus symbol file.
+    std::cout << "Testing zero-byte sidecar handling...\n";
+    std::cout.flush();
+
+    fs::path empty_cache_dir = fs::temp_directory_path() / "remake-test-sidecar-empty";
+    if (fs::exists(empty_cache_dir)) fs::remove_all(empty_cache_dir);
+    fs::create_directories(empty_cache_dir);
+
+    skipbuild::Cache empty_cache(empty_cache_dir, raw_config);
+    fs::path empty_pdb = work_dir / "empty.pdb";
+    std::ofstream(empty_pdb) << "";
+
+    auto empty_key = skipbuild::Cache::compute_key(src, includes, {"-O1"}, "test-compiler-empty");
+    std::vector<std::pair<fs::path, skipbuild::SidecarType>> empty_sidecars;
+    empty_sidecars.emplace_back(empty_pdb, skipbuild::SidecarType::PDB);
+    assert(empty_cache.put(empty_key, {obj}, empty_sidecars) && "put with empty sidecar should succeed");
+
+    auto empty_entry = empty_cache.get(empty_key);
+    assert(empty_entry.has_value() && "entry with empty sidecar should be readable");
+    assert(empty_entry->outputs.size() == 1 && "output should still be cached");
+    assert(empty_entry->sidecars.empty() && "zero-byte sidecar must not be cached");
+    empty_cache.release(*empty_entry);
+    std::cout << "PASS: zero-byte sidecars are skipped\n";
+    std::cout.flush();
     
     // Destroy cache before cleaning up directories by limiting its scope
     // (StatsTracker destructor writes to cache directory)

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-22
+
+### Highlights
+Cache-integrity and remote-transport release: correct lock release on Windows, accurate sidecar metadata, a working `compression_enabled` switch, enforced HTTP timeouts, and no plaintext HTTPS on platforms without TLS support.
+
+### Changed
+- **`compression_enabled` is honoured.** Disabling compression (config, `SKIPBUILD_COMPRESSION`, or `--compression false`) now stores artifacts uncompressed instead of being ignored; readers accept both compressed and raw entries, and `meta.json` records the actual layout.
+
+### Fixed
+- **File locks fully release on Windows.** `unlock()` tried to unlock a `MAXDWORD` range while only one byte was locked, which fails and left the lock held until the handle closed; it now unlocks the exact range and closes the handle, so a shared lock can be dropped and re-acquired exclusively (needed to purge corrupt entries) without leaking handles.
+- **Sidecar metadata no longer leaks the storage suffix.** `meta.json` recorded the stored `.zst` name and the hash of the compressed blob, so the real sidecar name/hash never matched. It now records the original filename and content hash, and the restore path matches it.
+- **Remote HTTP client timeouts are enforced.** The WinHTTP session passed `0` (infinite) for the receive timeout and for name resolution, so a server that accepted a connection but never replied could hang a build despite `remote_read_timeout`; resolve/connect now use the connect timeout and send/receive use the read timeout. On POSIX, where the raw-socket client has no TLS, `https://` URLs are refused (and leave the remote cache disabled) instead of sending a plaintext request to port 443.
+
 ## [0.5.0] - 2026-10-21
 
 ### Highlights

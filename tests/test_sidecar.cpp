@@ -84,6 +84,10 @@ int main() {
     assert(meta_content.find("sidecars") != std::string::npos && "meta.json should have sidecars array");
     assert(meta_content.find("pdb") != std::string::npos && "meta.json should mention pdb type");
     assert(meta_content.find("test.pdb") != std::string::npos && "meta.json should mention test.pdb");
+    // The metadata must use the real artifact name and content hash, not the
+    // storage name (which carries the ".zst" suffix when compression is on).
+    assert(meta_content.find("\"name\":\"test.pdb\"") != std::string::npos &&
+           "sidecar name must not include the .zst storage suffix");
     std::cout << "meta.json contains sidecar info: " << meta_content << "\n";
     std::cout.flush();
     std::cout << "About to call cache.get...\n";
@@ -132,6 +136,42 @@ int main() {
     std::string restored_content((std::istreambuf_iterator<char>(restored_f)), std::istreambuf_iterator<char>());
     assert(restored_content == std::string(2048, 'p') && "Restored PDB content should match original");
     std::cout << "Restored PDB content matches original\n";
+    std::cout.flush();
+
+    // Compression can be disabled at runtime; artifacts are stored raw and both
+    // layouts remain readable.
+    std::cout << "Testing compression_enabled=false storage...\n";
+    std::cout.flush();
+
+    fs::path raw_cache_dir = fs::temp_directory_path() / "remake-test-sidecar-raw";
+    if (fs::exists(raw_cache_dir)) fs::remove_all(raw_cache_dir);
+    fs::create_directories(raw_cache_dir);
+
+    skipbuild::CacheConfig raw_config = config;
+    raw_config.compression_enabled = false;
+    skipbuild::Cache raw_cache(raw_cache_dir, raw_config);
+
+    auto raw_key = skipbuild::Cache::compute_key(src, includes, {"-O0"}, "test-compiler-raw");
+    assert(raw_cache.put(raw_key, {obj}, sidecars) && "raw put should succeed");
+
+    fs::path raw_key_dir = raw_cache_dir / raw_key.hash.substr(0, 2) /
+                           raw_key.hash.substr(2, 2) / raw_key.hash;
+    assert(fs::exists(raw_key_dir / "test.o") && "raw object should be stored uncompressed");
+    assert(!fs::exists(raw_key_dir / "test.o.zst") && "raw object must not be zstd-compressed");
+    assert(fs::exists(raw_key_dir / "test.pdb") && "raw sidecar should be stored uncompressed");
+
+    std::ifstream raw_meta_f(raw_key_dir / "meta.json");
+    std::string raw_meta((std::istreambuf_iterator<char>(raw_meta_f)), std::istreambuf_iterator<char>());
+    assert(raw_meta.find("\"compressed\":false") != std::string::npos &&
+           "meta.json must record that the entry is uncompressed");
+
+    auto raw_entry = raw_cache.get(raw_key);
+    assert(raw_entry.has_value() && "uncompressed entry should be readable");
+    assert(raw_entry->outputs.size() == 1 && "raw entry should expose one output");
+    assert(fs::file_size(raw_entry->outputs[0]) == obj_data.size() && "raw output content should match");
+    assert(raw_entry->sidecars.size() == 1 && "raw entry should expose one sidecar");
+    raw_cache.release(*raw_entry);
+    std::cout << "PASS: compression_enabled=false stores and reads raw artifacts\n";
     std::cout.flush();
     
     // Destroy cache before cleaning up directories by limiting its scope

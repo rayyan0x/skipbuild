@@ -106,6 +106,40 @@ void test_truncated_zstd_entry() {
 #endif
 }
 
+void test_file_lock_release_and_relock() {
+    std::cout << "Testing file lock release and re-acquire...\n";
+
+    fs::path dir = fs::temp_directory_path() / "remake-test-filelock";
+    if (fs::exists(dir)) fs::remove_all(dir);
+    fs::create_directories(dir);
+    fs::path lock_path = dir / "test.lock";
+
+    {
+        skipbuild::FileLock lock(lock_path);
+        assert(lock.lock(skipbuild::FileLock::LockType::Shared, 1000));
+        assert(lock.is_locked());
+        lock.unlock();
+        assert(!lock.is_locked());
+
+        // Purging a corrupt entry depends on being able to drop a shared lock
+        // and immediately take an exclusive one in the same process.
+        assert(lock.lock(skipbuild::FileLock::LockType::Exclusive, 1000) &&
+               "released lock must be re-acquirable");
+        assert(lock.is_locked());
+        lock.unlock();
+        assert(!lock.is_locked());
+    }
+
+    {
+        skipbuild::FileLock other(lock_path);
+        assert(other.lock(skipbuild::FileLock::LockType::Exclusive, 1000) &&
+               "lock must be fully released for another holder");
+    }
+
+    fs::remove_all(dir);
+    std::cout << "  PASS: lock releases and can be re-acquired\n";
+}
+
 void test_cache_put_failure_disk_full_simulation() {
     std::cout << "Testing cache put failure handling (permission denied)...\n";
     
@@ -348,6 +382,9 @@ int main() {
     std::cout << "\n";
     
     test_truncated_zstd_entry();
+    std::cout << "\n";
+    
+    test_file_lock_release_and_relock();
     std::cout << "\n";
     
     test_cache_put_failure_disk_full_simulation();

@@ -611,7 +611,7 @@ $env:REMAKE_LOG = "debug"
 **Security:**
 - Cache stores: compiler output (`.obj`/`.o`), debug sidecars (`.pdb`, `.idb`, `.dwo`), metadata (key, toolchain hash, timestamps). No source code.
 - Disk: zstd level 3 compressed blobs in `~/.cache/skipbuild/aa/bb/<hash>/` with `meta.json`
-- Remote auth: Header-based (`SKIPBUILD_REMOTE_AUTH_HEADER`). Credentials are **never sent over an unencrypted transport** — plaintext `http://` (and all non-Windows builds, which have no TLS client) drop the auth header unless you explicitly set `SKIPBUILD_REMOTE_ALLOW_INSECURE=1`.
+- Remote auth: Header-based (`SKIPBUILD_REMOTE_AUTH_HEADER`). Credentials are **never sent over an unencrypted transport** — plaintext `http://` (and all non-Windows builds, which have no TLS client) drop the auth header unless you explicitly set `SKIPBUILD_REMOTE_ALLOW_INSECURE=1`. Non-Windows builds reject `https://` URLs entirely rather than speaking plaintext to port 443.
 - Remote artifacts: names from the remote are sanitised to a bare filename before writing (no path traversal), and zstd blobs are decompressed with a streaming, size-bounded reader (no decompression bombs).
 - Reporting: See [SECURITY.md](SECURITY.md)
 

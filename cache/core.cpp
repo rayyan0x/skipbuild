@@ -272,12 +272,24 @@ struct FileLock::Impl {
     }
     
     void unlock() {
-        if (!locked_ || handle_ == INVALID_HANDLE_VALUE) return;
-        
-        OVERLAPPED overlapped = {0};
-        if (!UnlockFileEx(handle_, 0, MAXDWORD, MAXDWORD, &overlapped)) {
-            // Ignore errors on unlock
+        if (handle_ == INVALID_HANDLE_VALUE) {
+            locked_ = false;
+            return;
         }
+        
+        if (locked_) {
+            OVERLAPPED overlapped = {0};
+            // Must match the region locked above: 1 byte at offset 0. Windows
+            // requires the unlocked region to match the locked one; unlocking
+            // MAXDWORD bytes fails with ERROR_NOT_LOCKED and leaves the lock held.
+            UnlockFileEx(handle_, 0, 1, 0, &overlapped);
+        }
+
+        // Closing the handle releases any byte-range lock still held by this
+        // process, even if UnlockFileEx failed. It also prevents the handle from
+        // leaking (and the old lock from surviving) when the lock is re-acquired.
+        CloseHandle(handle_);
+        handle_ = INVALID_HANDLE_VALUE;
         locked_ = false;
     }
     
@@ -393,9 +405,18 @@ struct FileLock::Impl {
     }
     
     void unlock() {
-        if (!locked_ || fd_ < 0) return;
+        if (fd_ < 0) {
+            locked_ = false;
+            return;
+        }
         
-        flock(fd_, LOCK_UN);
+        if (locked_) {
+            flock(fd_, LOCK_UN);
+        }
+        // Closing also releases the flock (per open file description) and keeps
+        // a re-lock from leaking the previous descriptor.
+        close(fd_);
+        fd_ = -1;
         locked_ = false;
     }
     
@@ -532,20 +553,28 @@ static std::string compute_file_hash(const std::filesystem::path& path) {
     return compute_sha256(content);
 }
 
-// Helper to write meta.json with sidecar info
+// Helper to write meta.json with sidecar info. Sidecars are described by their
+// original (decompressed) filename and content hash; the storage filename may
+// differ (e.g. `<name>.zst`), and callers must not leak that into the metadata.
+struct MetaSidecar {
+    std::string name;
+    SidecarType type;
+    std::string hash;
+};
+
 static bool write_meta_json(const std::filesystem::path& meta_file, const std::filesystem::path& meta_temp,
-                            const std::string& toolchain_id, int64_t total_size,
-                            const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars) {
+                            const std::string& toolchain_id, int64_t total_size, bool compressed,
+                            const std::vector<MetaSidecar>& sidecars) {
     std::ofstream meta(meta_temp);
     if (!meta) return false;
     
     meta << "{\"toolchain\":\"" << toolchain_id << "\",\"ts\":" << std::time(nullptr) << ",\"size\":" << total_size;
-    meta << ",\"compressed\":true";
+    meta << ",\"compressed\":" << (compressed ? "true" : "false");
     
     if (!sidecars.empty()) {
         meta << ",\"sidecars\":[";
         for (size_t i = 0; i < sidecars.size(); ++i) {
-            const auto& [path, type] = sidecars[i];
+            const auto& [name, type, hash] = sidecars[i];
             std::string type_str;
             switch (type) {
                 case SidecarType::PDB: type_str = "pdb"; break;
@@ -554,9 +583,9 @@ static bool write_meta_json(const std::filesystem::path& meta_file, const std::f
                 default: type_str = "other"; break;
             }
             if (i > 0) meta << ",";
-            meta << "{\"name\":\"" << path.filename().string() 
-                 << "\",\"type\":\"" << type_str 
-                 << "\",\"hash\":\"" << compute_file_hash(path) << "\"}";
+            meta << "{\"name\":\"" << name
+                 << "\",\"type\":\"" << type_str
+                 << "\",\"hash\":\"" << hash << "\"}";
         }
         meta << "]";
     }
@@ -742,6 +771,48 @@ static std::filesystem::path make_temp_path(const std::filesystem::path& base_di
     return base_dir / oss.str();
 }
 
+// Store one artifact in an entry directory, compressed or raw, via a temp file
+// and an atomic replace. `compression_enabled=false` must produce the same
+// on-disk layout as a build without zstd (raw files, no ".zst" suffix).
+static bool store_cache_file(const std::filesystem::path& src,
+                             const std::filesystem::path& key_dir,
+                             const std::string& stored_name,
+                             bool compress,
+                             std::filesystem::path& dest_out,
+                             int64_t& total_size) {
+    std::filesystem::path dest = key_dir / stored_name;
+    std::filesystem::path temp_dest = make_temp_path(key_dir, "cache_" + stored_name);
+
+    bool written = false;
+#if REMAKE_HAVE_ZSTD
+    if (compress) {
+        written = compress_file(src, temp_dest);
+    } else
+#endif
+    {
+        std::error_code copy_ec;
+        std::filesystem::copy_file(src, temp_dest, std::filesystem::copy_options::overwrite_existing, copy_ec);
+        written = !copy_ec;
+    }
+
+    if (!written) {
+        std::error_code remove_ec;
+        std::filesystem::remove(temp_dest, remove_ec);
+        return false;
+    }
+
+    if (!atomic_replace_file(temp_dest, dest)) {
+        std::error_code remove_ec;
+        std::filesystem::remove(temp_dest, remove_ec);
+        return false;
+    }
+
+    std::error_code size_ec;
+    total_size += static_cast<int64_t>(std::filesystem::file_size(dest, size_ec));
+    dest_out = dest;
+    return true;
+}
+
 bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& outputs,
                 const std::vector<std::pair<std::filesystem::path, SidecarType>>& sidecars) {
     // Read-only caches may still be read, but must never create or modify
@@ -766,110 +837,44 @@ bool Cache::put(const CacheKey& key, const std::vector<std::filesystem::path>& o
         std::filesystem::create_directories(key_dir, ec);
         if (ec) return false;
 
-        std::vector<std::pair<std::filesystem::path, SidecarType>> stored_sidecars;
-        
-        #if REMAKE_HAVE_ZSTD
-        // Store primary outputs (with compression)
-        std::vector<std::pair<std::filesystem::path, bool>> stored_outputs; // {path, is_compressed}
+        std::vector<MetaSidecar> stored_sidecars;
+
+        // Compression is a documented user-facing option; honour it at runtime
+        // instead of always compressing whenever zstd happens to be available.
+        bool use_compression = false;
+#if REMAKE_HAVE_ZSTD
+        use_compression = config_.compression_enabled;
+#endif
+
         for (const auto& output : outputs) {
             if (!std::filesystem::exists(output)) continue;
             // A zero-byte object file means the compile failed (or produced
             // nothing); caching it would poison the key, so skip it.
             if (std::filesystem::file_size(output, ec) == 0) continue;
-            
-            std::filesystem::path dest = key_dir / (output.filename().string() + ".zst");
-            std::filesystem::path temp_dest = make_temp_path(key_dir, "cache_" + output.filename().string() + ".zst");
-            
-            // Compress file
-            if (!compress_file(output, temp_dest)) {
+
+            std::filesystem::path dest;
+            std::string stored_name = output.filename().string() + (use_compression ? ".zst" : "");
+            if (!store_cache_file(output, key_dir, stored_name, use_compression, dest, total_size)) {
                 return false;
             }
-            
-            // Atomic replace
-            if (!atomic_replace_file(temp_dest, dest)) {
-                std::error_code ec2;
-                std::filesystem::remove(temp_dest, ec2);
-                return false;
-            }
-            
-            total_size += std::filesystem::file_size(dest, ec);
-            stored_outputs.emplace_back(dest, true);
         }
-        
-        // Store sidecar files (with compression)
+
         for (const auto& [sidecar_path, sidecar_type] : sidecars) {
             if (!std::filesystem::exists(sidecar_path)) continue;
-            
-            std::filesystem::path dest = key_dir / (sidecar_path.filename().string() + ".zst");
-            std::filesystem::path temp_dest = make_temp_path(key_dir, "cache_" + sidecar_path.filename().string() + ".zst");
-            
-            // Compress file
-            if (!compress_file(sidecar_path, temp_dest)) {
+
+            std::filesystem::path dest;
+            std::string stored_name = sidecar_path.filename().string() + (use_compression ? ".zst" : "");
+            if (!store_cache_file(sidecar_path, key_dir, stored_name, use_compression, dest, total_size)) {
                 return false;
             }
-            
-            // Atomic replace
-            if (!atomic_replace_file(temp_dest, dest)) {
-                std::error_code ec2;
-                std::filesystem::remove(temp_dest, ec2);
-                return false;
-            }
-            
-            total_size += std::filesystem::file_size(dest, ec);
-            stored_sidecars.emplace_back(dest, sidecar_type);
+
+            stored_sidecars.push_back({sidecar_path.filename().string(), sidecar_type, compute_file_hash(sidecar_path)});
         }
-        #else
-        // Store primary outputs (without compression)
-        for (const auto& output : outputs) {
-            if (!std::filesystem::exists(output)) continue;
-            // A zero-byte object file means the compile failed (or produced
-            // nothing); caching it would poison the key, so skip it.
-            if (std::filesystem::file_size(output, ec) == 0) continue;
-            
-            std::filesystem::path dest = key_dir / output.filename();
-            std::filesystem::path temp_dest = make_temp_path(key_dir, "cache_" + output.filename().string());
-            
-            // Copy to temp file first
-            std::filesystem::copy_file(output, temp_dest, std::filesystem::copy_options::overwrite_existing, ec);
-            if (ec) return false;
-            
-            // Atomic replace
-            if (!atomic_replace_file(temp_dest, dest)) {
-                std::error_code ec2;
-                std::filesystem::remove(temp_dest, ec2);
-                return false;
-            }
-            
-            total_size += std::filesystem::file_size(output, ec);
-        }
-        
-        // Store sidecar files
-        for (const auto& [sidecar_path, sidecar_type] : sidecars) {
-            if (!std::filesystem::exists(sidecar_path)) continue;
-            
-            std::filesystem::path dest = key_dir / sidecar_path.filename();
-            std::filesystem::path temp_dest = make_temp_path(key_dir, "cache_" + sidecar_path.filename().string());
-            
-            // Copy to temp file first
-            std::filesystem::copy_file(sidecar_path, temp_dest, std::filesystem::copy_options::overwrite_existing, ec);
-            if (ec) return false;
-            
-            // Atomic replace
-            if (!atomic_replace_file(temp_dest, dest)) {
-                std::error_code ec2;
-                std::filesystem::remove(temp_dest, ec2);
-                return false;
-            }
-            
-            total_size += std::filesystem::file_size(sidecar_path, ec);
-            stored_sidecars.emplace_back(dest, sidecar_type);
-        }
-        #endif
         
         // Write meta.json atomically with sidecar info and compression info
         std::filesystem::path meta_file = key_dir / "meta.json";
         std::filesystem::path meta_temp = make_temp_path(key_dir, "meta");
-        if (!write_meta_json(meta_file, meta_temp, key.toolchain_id, total_size, stored_sidecars)) {
+        if (!write_meta_json(meta_file, meta_temp, key.toolchain_id, total_size, use_compression, stored_sidecars)) {
             return false;
         }
         
@@ -989,7 +994,7 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key,
             entry.key = key;
             entry.timestamp = std::time(nullptr);
             entry.size_bytes = 0;
-            std::vector<std::pair<fs::path, SidecarType>> stored_sidecars;
+            std::vector<MetaSidecar> stored_sidecars;
             std::vector<fs::path> staged_files;
 
             for (const auto& artifact : remote_result.artifacts) {
@@ -1044,7 +1049,7 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key,
                             : (ext == ".dwo") ? SidecarType::DWO
                             : SidecarType::Other;
                     entry.sidecars.push_back(si);
-                    stored_sidecars.emplace_back(dest, si.type);
+                    stored_sidecars.push_back({*safe_name, si.type, si.hash});
                 } else {
                     entry.outputs.push_back(staged);
                 }
@@ -1059,7 +1064,12 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key,
             // and collectors/pruners see a complete entry.
             fs::path meta_file = key_dir / "meta.json";
             fs::path meta_temp = make_temp_path(key_dir, "meta.json");
-            if (!write_meta_json(meta_file, meta_temp, key.toolchain_id, entry.size_bytes, stored_sidecars)) {
+#if REMAKE_HAVE_ZSTD
+            const bool stored_compressed = true;  // remote artifacts are zstd-compressed
+#else
+            const bool stored_compressed = false;
+#endif
+            if (!write_meta_json(meta_file, meta_temp, key.toolchain_id, entry.size_bytes, stored_compressed, stored_sidecars)) {
                 drop_stage();
                 return std::nullopt;
             }
@@ -1232,8 +1242,14 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                                 has_corrupted = true;
                                 break;
                             }
-                            // Check if it's a compressed file (.zst)
+                            // A ".zst" artifact is decompressed into the staging
+                            // directory; a raw artifact (legacy entry, or one
+                            // stored with compression_enabled=false) is used in
+                            // place.
                             std::string ext = f.path().extension().string();
+                            std::filesystem::path artifact_path;
+                            bool materialized = false;
+
                             #if REMAKE_HAVE_ZSTD
                             if (ext == ".zst") {
                                 // Materialise the artifact into a private staging
@@ -1250,55 +1266,42 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                                         break;
                                     }
                                 }
-                                std::filesystem::path dest_path = stage_dir / f.path().stem();
-                                if (!decompress_file(f.path(), dest_path)) {
+                                artifact_path = stage_dir / f.path().stem();
+                                if (!decompress_file(f.path(), artifact_path)) {
                                     has_corrupted = true;
                                     break;
                                 }
                                 // Record it so the caller can delete the
                                 // (regenerable) decompressed copy after use.
-                                entry.transient_files.push_back(dest_path);
-                                
-                                // Check if it's a sidecar file
-                                std::string stem_ext = dest_path.extension().string();
-                                if (stem_ext == ".pdb" || stem_ext == ".idb" || stem_ext == ".dwo") {
-                                    SidecarInfo si;
-                                    si.relative_path = dest_path;
-                                    si.hash = compute_file_hash(dest_path);
-                                    
-                                    if (stem_ext == ".pdb") si.type = SidecarType::PDB;
-                                    else if (stem_ext == ".idb") si.type = SidecarType::IDB;
-                                    else if (stem_ext == ".dwo") si.type = SidecarType::DWO;
-                                    else si.type = SidecarType::Other;
-                                    
-                                    entry.sidecars.push_back(si);
-                                } else {
-                                    entry.outputs.push_back(dest_path);
-                                }
-                                entry.size_bytes += std::filesystem::file_size(dest_path, ec);
+                                entry.transient_files.push_back(artifact_path);
+                                materialized = true;
                             }
-                            // Ignore non-.zst files (they may be previously decompressed files)
                             #else
-                            {
-                                // Uncompressed file (legacy)
-                                // Check if it's a sidecar file by checking extension
-                                if (ext == ".pdb" || ext == ".idb" || ext == ".dwo") {
-                                    SidecarInfo si;
-                                    si.relative_path = f.path();
-                                    si.hash = compute_file_hash(f.path());
-                                    
-                                    if (ext == ".pdb") si.type = SidecarType::PDB;
-                                    else if (ext == ".idb") si.type = SidecarType::IDB;
-                                    else if (ext == ".dwo") si.type = SidecarType::DWO;
-                                    else si.type = SidecarType::Other;
-                                    
-                                    entry.sidecars.push_back(si);
-                                } else {
-                                    entry.outputs.push_back(f.path());
-                                }
-                                entry.size_bytes += size;
+                            if (ext == ".zst") {
+                                // Entry written by a zstd-enabled build; this
+                                // build cannot decompress it.
+                                continue;
                             }
                             #endif
+
+                            if (!materialized) artifact_path = f.path();
+
+                            // Check if it's a sidecar file by extension
+                            std::string artifact_ext = artifact_path.extension().string();
+                            if (artifact_ext == ".pdb" || artifact_ext == ".idb" || artifact_ext == ".dwo") {
+                                SidecarInfo si;
+                                si.relative_path = artifact_path;
+                                si.hash = compute_file_hash(artifact_path);
+
+                                if (artifact_ext == ".pdb") si.type = SidecarType::PDB;
+                                else if (artifact_ext == ".idb") si.type = SidecarType::IDB;
+                                else si.type = SidecarType::DWO;
+
+                                entry.sidecars.push_back(si);
+                            } else {
+                                entry.outputs.push_back(artifact_path);
+                            }
+                            entry.size_bytes += std::filesystem::file_size(artifact_path, ec);
                         }
                     }
 
@@ -2589,9 +2592,17 @@ public:
     void set_timeouts(int connect_ms, int read_ms) {
         connect_timeout_ms_ = connect_ms;
         read_timeout_ms_ = read_ms;
-        if (session_) {
-            WinHttpSetTimeouts(session_, 0, connect_timeout_ms_, read_timeout_ms_, 0);
-        }
+        apply_timeouts();
+    }
+
+    void apply_timeouts() {
+        if (!session_) return;
+        // Resolve and connect are bounded by the connect timeout; send and
+        // receive both use the read timeout. Passing 0 for receive (as before)
+        // means "infinite", so a server that accepts the connection but never
+        // answers would hang the build despite the configured timeouts.
+        WinHttpSetTimeouts(session_, connect_timeout_ms_, connect_timeout_ms_,
+                           read_timeout_ms_, read_timeout_ms_);
     }
     
     HttpResponse request(const ParsedUrl& url, const std::string& method,
@@ -2611,7 +2622,7 @@ public:
             return response;
         }
         
-        WinHttpSetTimeouts(session_, 0, connect_timeout_ms_, read_timeout_ms_, 0);
+        apply_timeouts();
         
         DWORD flags = url.is_ssl ? WINHTTP_FLAG_SECURE : 0;
         WinHttpHandle request(WinHttpOpenRequest(connect, to_wide(method).c_str(),
@@ -2720,7 +2731,7 @@ class PosixHttpClient {
     std::string user_agent_ = "remake/" SKIPBUILD_VERSION;
     int connect_timeout_ms_ = 3000;
     int read_timeout_ms_ = 3000;
-    bool verify_ssl_ = true;  // Not used for POSIX (no SSL support in raw sockets)
+    bool verify_ssl_ = true;  // Unused: the raw-socket client has no TLS and rejects https://
     std::string auth_header_;
     std::string host_;
     std::string port_;
@@ -2855,6 +2866,15 @@ public:
                          const std::vector<uint8_t>* body = nullptr,
                          const std::string& content_type = "") {
         HttpResponse response;
+        
+        // This client speaks plaintext HTTP only. Refuse https:// instead of
+        // connecting to port 443 and sending an unencrypted request (which both
+        // fails against a real server and would expose the payload).
+        if (url.is_ssl) {
+            response.error = "HTTPS is not supported by this platform's HTTP client "
+                             "(no TLS support); use an http:// endpoint on a trusted network";
+            return response;
+        }
         
         // Store host/port for reconnection
         host_ = url.host;
@@ -3094,7 +3114,8 @@ struct RemoteCache::Impl {
         : config_(std::move(config)), local_cache_(std::move(local_cache)) {
         // Never transmit credentials over a transport that is not actually
         // encrypted. On Windows that means plaintext HTTP; on POSIX the raw
-        // socket client has no TLS at all, so every request is plaintext.
+        // socket client has no TLS at all, so only plaintext http:// works
+        // (https:// is rejected and leaves the remote cache disabled).
         if (!config_.url.empty() && !config_.auth_header.empty()) {
             auto parsed = parse_url(config_.url);
             bool transport_secure = false;
@@ -3135,6 +3156,16 @@ struct RemoteCache::Impl {
         
         if (client_ && client_->is_valid()) {
             parsed_base_url_ = parse_url(config_.url);
+#ifndef _WIN32
+            // The POSIX client has no TLS at all. Treat an https:// URL as
+            // unconfigured rather than silently talking plaintext to port 443.
+            if (parsed_base_url_ && parsed_base_url_->is_ssl) {
+                std::cerr << "[build-cache warning] Remote cache URL uses https://, but this "
+                             "build has no TLS support on this platform; remote caching is "
+                             "disabled. Use an http:// endpoint on a trusted network.\n";
+                parsed_base_url_.reset();
+            }
+#endif
         }
     }
     

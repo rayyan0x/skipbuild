@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-22
+
+### Highlights
+Cache-integrity and remote-transport release: correct lock release on Windows, accurate sidecar metadata, a working `compression_enabled` switch, enforced HTTP timeouts, and no plaintext HTTPS on platforms without TLS support.
+
+### Changed
+- **`compression_enabled` is honoured.** Disabling compression (config, `SKIPBUILD_COMPRESSION`, or `--compression false`) now stores artifacts uncompressed instead of being ignored; readers accept both compressed and raw entries, and `meta.json` records the actual layout.
+
+### Fixed
+- **File locks fully release on Windows.** `unlock()` tried to unlock a `MAXDWORD` range while only one byte was locked, which fails and left the lock held until the handle closed; it now unlocks the exact range and closes the handle, so a shared lock can be dropped and re-acquired exclusively (needed to purge corrupt entries) without leaking handles.
+- **Sidecar metadata no longer leaks the storage suffix.** `meta.json` recorded the stored `.zst` name and the hash of the compressed blob, so the real sidecar name/hash never matched. It now records the original filename and content hash, and the restore path matches it.
+- **Remote HTTP client timeouts are enforced.** The WinHTTP session passed `0` (infinite) for the receive timeout and for name resolution, so a server that accepted a connection but never replied could hang a build despite `remote_read_timeout`; resolve/connect now use the connect timeout and send/receive use the read timeout. On POSIX, where the raw-socket client has no TLS, `https://` URLs are refused (and leave the remote cache disabled) instead of sending a plaintext request to port 443.
+
 ## [0.5.0] - 2026-10-21
 
 ### Highlights
@@ -21,7 +34,6 @@ Correctness and cache-integrity release: CLI routing and argument passthrough, o
 - **Configuration precedence honors explicit CLI intent.** Boolean CLI overrides (`--compression`, `--read-only`, `--remote-read-only`) are applied only when the flag is actually passed; previously the override struct's defaults silently reset project/env values. The project config (`.skipbuild.conf`, legacy `.buildcache.conf`) is now discovered by walking up from the current directory, so builds invoked from a subdirectory find it.
 - **`--remote-read-only` is a plain flag and only disables uploads.** It no longer consumes the next argument and no longer sets the local `read_only` flag (which, once read-only was enforced, would also have stopped local caching). A separate `remote_read_only` config key and `SKIPBUILD_REMOTE_READ_ONLY` env var were added.
 - **Remote cache round-trips every artifact by name.** The remote `meta.json` now lists each uploaded output and sidecar (original filename + server file), and all of them are uploaded. A remote hit downloads the full set and installs it as a normal local entry, so multi-output links (`.dll` + import `.lib`), PCH creation (`.o` + `.pch`) and debug sidecars are restored under their real names instead of only the first output. Entries in the legacy single-primary layout are still readable.
-- **`compression_enabled` is honoured.** Disabling compression (config, `SKIPBUILD_COMPRESSION`, or `--compression false`) now stores artifacts uncompressed instead of being ignored; readers accept both compressed and raw entries, and `meta.json` records the actual layout.
 
 ### Fixed
 - **`read_only` now blocks local writes.** `Cache::put()` returns without creating or modifying an entry, so a read-only cache only serves hits (remote uploads were already suppressed).
@@ -29,9 +41,6 @@ Correctness and cache-integrity release: CLI routing and argument passthrough, o
 - **Truncated zstd frames are rejected.** The streaming decoder treated "input exhausted before the frame ended" as success, so a truncated cache blob restored a partial object. It now requires the frame to complete (`ZSTD_decompressStream` returns 0) and reports corruption instead, which purges the entry; regression test added.
 - **File writes are checked before they are trusted.** Compressed blobs, restored artifacts, `meta.json` and `stats.json` are now flushed and their stream state verified; a failed or short write removes the temporary file and reports failure instead of publishing a truncated entry (or overwriting good stats with a partial one).
 - **Pruning honours `max_age` and its size target.** Age-based eviction was gated on the cache already being over its size limit and compared `file_time_type` ticks (1601 epoch on Windows) against `system_clock`, so expired entries were never removed. Age eviction now runs independently (a non-positive value disables it), timestamps are converted to Unix time, and the LRU pass no longer re-visits (and double-subtracts) entries already removed by the age pass.
-- **File locks fully release on Windows.** `unlock()` tried to unlock a `MAXDWORD` range while only one byte was locked, which fails and left the lock held until the handle closed; it now unlocks the exact range and closes the handle, so a shared lock can be dropped and re-acquired exclusively (needed to purge corrupt entries) without leaking handles.
-- **Sidecar metadata no longer leaks the storage suffix.** `meta.json` recorded the stored `.zst` name and the hash of the compressed blob, so the real sidecar name/hash never matched. It now records the original filename and content hash, and the restore path matches it.
-- **Remote HTTP client timeouts are enforced.** The WinHTTP session passed `0` (infinite) for the receive timeout and for name resolution, so a server that accepted a connection but never replied could hang a build despite `remote_read_timeout`; resolve/connect now use the connect timeout and send/receive use the read timeout. On POSIX, where the raw-socket client has no TLS, `https://` URLs are refused (and leave the remote cache disabled) instead of sending a plaintext request to port 443.
 - **Remote hits install a valid local entry.** Fetched artifacts are materialised in a private staging directory and installed under the entry lock with a `meta.json`, so subsequent lookups hit locally and no unaccounted `<hash>.obj` junk is left behind. Sidecars are restored under their real names (derived from the primary output stem) instead of hash-derived ones.
 - **`g++`/`clang++` compile-only commands (`-c`) were misrouted to the linker cache**, whose key ignores the source and compile flags, so every recompile of a file replayed a stale cached object. Such commands now go through the compiler path.
 - **Exit codes on bypass paths were inverted** (`return run_compiler(args) ? 0 : 1;`), and the optional `--` separator was passed to the compiler as a source file. Bypass paths now return the compiler's real exit code, propagate spawn failures (127), and drop `--`.

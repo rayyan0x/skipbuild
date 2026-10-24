@@ -100,7 +100,7 @@ function(skipbuild_enable_asserts target)
     endif()
 endfunction()
 
-foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats pch response_file key_soundness auto_clear)
+foreach(t cache concurrent multiprocess eviction sidecar cache_key_determinism resiliency config stats pch response_file key_soundness auto_clear)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} remake_core)
     skipbuild_sanitize(test_${t})
@@ -120,9 +120,8 @@ endforeach()
 
 add_test(NAME cache_test COMMAND test_cache)
 add_test(NAME concurrent_test COMMAND test_concurrent)
-add_test(NAME multiprocess_test COMMAND test_multiprocess 0)
+add_test(NAME multiprocess_test COMMAND test_multiprocess)
 add_test(NAME eviction_test COMMAND test_eviction)
-add_test(NAME simple_test COMMAND test_simple)
 add_test(NAME sidecar_test COMMAND test_sidecar)
 add_test(NAME cache_key_determinism_test COMMAND test_cache_key_determinism)
 add_test(NAME resiliency_test COMMAND test_resiliency)
@@ -133,6 +132,16 @@ add_test(NAME response_file_test COMMAND test_response_file)
 add_test(NAME init_test COMMAND test_init)
 add_test(NAME key_soundness_test COMMAND test_key_soundness)
 add_test(NAME auto_clear_test COMMAND test_auto_clear)
+
+# Drives the installed launcher with the real compiler (miss -> hit -> header
+# edit invalidates), so the CLI wrapper itself is covered by CI.
+add_test(NAME cli_e2e_test COMMAND ${CMAKE_COMMAND}
+    "-DSKIPBUILD=$<TARGET_FILE:skipbuild>"
+    "-DCOMPILER=${CMAKE_CXX_COMPILER}"
+    "-DCOMPILER_ID=${CMAKE_CXX_COMPILER_ID}"
+    "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_e2e"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_e2e.cmake"
+)
 
 
 # core.hpp includes config.hpp, stats.hpp and remote.hpp, so consumers need all

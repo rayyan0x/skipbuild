@@ -1,0 +1,71 @@
+# End-to-end test of the `skipbuild -- <compiler>` entry point: a real compiler
+# is wrapped, the first compile must MISS, an identical second compile must HIT,
+# and editing an included header must invalidate the entry again.
+#
+# Required variables:
+#   SKIPBUILD    - path to the launcher executable
+#   COMPILER     - path to a C++ compiler
+#   COMPILER_ID  - CMake compiler id (MSVC changes the flag spelling)
+#   WORK         - scratch directory
+
+foreach(var SKIPBUILD COMPILER COMPILER_ID WORK)
+    if(NOT DEFINED ${var})
+        message(FATAL_ERROR "cli_e2e.cmake: ${var} is required")
+    endif()
+endforeach()
+
+set(work "${WORK}")
+set(cache "${work}/cache")
+file(REMOVE_RECURSE "${work}")
+file(MAKE_DIRECTORY "${work}")
+
+set(header "${work}/h.h")
+set(source "${work}/a.cpp")
+file(WRITE "${header}" "#define VAL 1\n")
+file(WRITE "${source}" "#include \"h.h\"\nint f() { return VAL; }\n")
+
+if(COMPILER_ID STREQUAL "MSVC")
+    set(obj "${work}/a.obj")
+    set(compile_args /nologo /c /I "${work}" "${source}" "/Fo${obj}")
+else()
+    set(obj "${work}/a.o")
+    set(compile_args -c -I "${work}" "${source}" -o "${obj}")
+endif()
+
+function(run_launcher out_var)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "SKIPBUILD_DIR=${cache}"
+                "SKIPBUILD_CACHE_DIR=${cache}"
+                "${SKIPBUILD}" -- "${COMPILER}" ${ARGN}
+        WORKING_DIRECTORY "${work}"
+        OUTPUT_VARIABLE out
+        ERROR_VARIABLE err
+        RESULT_VARIABLE rc
+    )
+    if(NOT rc EQUAL 0)
+        message(FATAL_ERROR "launcher exited with ${rc}\nstdout:\n${out}\nstderr:\n${err}")
+    endif()
+    if(NOT EXISTS "${obj}")
+        message(FATAL_ERROR "compiler produced no object file\nstdout:\n${out}\nstderr:\n${err}")
+    endif()
+    set(${out_var} "${out}${err}" PARENT_SCOPE)
+endfunction()
+
+run_launcher(first ${compile_args})
+if(first MATCHES "HIT")
+    message(FATAL_ERROR "expected MISS on first compile, got:\n${first}")
+endif()
+
+run_launcher(second ${compile_args})
+if(NOT second MATCHES "HIT")
+    message(FATAL_ERROR "expected HIT on second compile, got:\n${second}")
+endif()
+
+file(WRITE "${header}" "#define VAL 2\n")
+run_launcher(third ${compile_args})
+if(third MATCHES "HIT")
+    message(FATAL_ERROR "header edit did not invalidate the cache, got:\n${third}")
+endif()
+
+message(STATUS "cli e2e test passed")

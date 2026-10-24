@@ -1,11 +1,15 @@
-cmake_minimum_required(VERSION 3.20)
-project(skipbuild LANGUAGES CXX VERSION 0.6.0)
+cmake_minimum_required(VERSION 3.24)
+project(skipbuild LANGUAGES CXX VERSION 0.6.1)
+
+include(GNUInstallDirs)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 cmake_policy(SET CMP0135 NEW)
-set(CMAKE_POLICY_VERSION_MINIMUM "3.5" CACHE STRING "" FORCE)
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+    set(CMAKE_POLICY_VERSION_MINIMUM "3.5")
+endif()
 
 # ZSTD: always fetch and build zstd 1.5.5 from source (avoids target name differences across platforms)
 include(FetchContent)
@@ -31,10 +35,16 @@ set(REMAKE_HAVE_ZSTD 1)
 
 # Core library
 add_library(remake_core STATIC cache/core.cpp cache/stats.cpp cache/config.cpp)
-target_include_directories(remake_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cache)
+target_include_directories(remake_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/cache>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/skipbuild>
+)
 
 if(ZSTD_INCLUDE_DIRS)
-    target_include_directories(remake_core PUBLIC ${ZSTD_INCLUDE_DIRS})
+    # zstd's own CMake does not export its include dirs, so the core library
+    # needs them; they are PRIVATE because core.hpp does not include zstd.h and
+    # build-tree paths must not leak into the exported target.
+    target_include_directories(remake_core PRIVATE ${ZSTD_INCLUDE_DIRS})
 endif()
 
 target_link_libraries(remake_core PUBLIC ${REMAKE_ZSTD_TARGET})
@@ -90,7 +100,7 @@ function(skipbuild_enable_asserts target)
     endif()
 endfunction()
 
-foreach(t cache concurrent multiprocess eviction simple sidecar cache_key_determinism resiliency config stats pch response_file key_soundness auto_clear)
+foreach(t cache concurrent multiprocess eviction sidecar cache_key_determinism resiliency config stats pch response_file key_soundness auto_clear)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_link_libraries(test_${t} remake_core)
     skipbuild_sanitize(test_${t})
@@ -110,9 +120,8 @@ endforeach()
 
 add_test(NAME cache_test COMMAND test_cache)
 add_test(NAME concurrent_test COMMAND test_concurrent)
-add_test(NAME multiprocess_test COMMAND test_multiprocess 0)
+add_test(NAME multiprocess_test COMMAND test_multiprocess)
 add_test(NAME eviction_test COMMAND test_eviction)
-add_test(NAME simple_test COMMAND test_simple)
 add_test(NAME sidecar_test COMMAND test_sidecar)
 add_test(NAME cache_key_determinism_test COMMAND test_cache_key_determinism)
 add_test(NAME resiliency_test COMMAND test_resiliency)
@@ -124,27 +133,68 @@ add_test(NAME init_test COMMAND test_init)
 add_test(NAME key_soundness_test COMMAND test_key_soundness)
 add_test(NAME auto_clear_test COMMAND test_auto_clear)
 
-# Install targets
-install(TARGETS skipbuild
-    RUNTIME DESTINATION bin
-    BUNDLE DESTINATION bin
+# Drives the installed launcher with the real compiler (miss -> hit -> header
+# edit invalidates), so the CLI wrapper itself is covered by CI.
+add_test(NAME cli_e2e_test COMMAND ${CMAKE_COMMAND}
+    "-DSKIPBUILD=$<TARGET_FILE:skipbuild>"
+    "-DCOMPILER=${CMAKE_CXX_COMPILER}"
+    "-DCOMPILER_ID=${CMAKE_CXX_COMPILER_ID}"
+    "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_e2e"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_e2e.cmake"
 )
-install(TARGETS remake_core
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin
+
+
+# core.hpp includes config.hpp, stats.hpp and remote.hpp, so consumers need all
+# of them (crypto.hpp is used by the core implementation).
+install(FILES
+    cache/core.hpp
+    cache/config.hpp
+    cache/stats.hpp
+    cache/remote.hpp
+    cache/crypto.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/skipbuild
 )
-install(FILES cache/core.hpp DESTINATION include/skipbuild)
+
+# Export the core library and the launcher. zstd is bundled and installed by its
+# own project, so it is part of the same export set; otherwise the exported
+# target would reference a dependency the consumer cannot resolve.
+install(TARGETS skipbuild remake_core ${REMAKE_ZSTD_TARGET}
+    EXPORT skipbuildTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    BUNDLE DESTINATION ${CMAKE_INSTALL_BINDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+set_target_properties(remake_core PROPERTIES EXPORT_NAME core)
+
+install(EXPORT skipbuildTargets
+    FILE skipbuildTargets.cmake
+    NAMESPACE skipbuild::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/skipbuild
+)
 
 # CMake integration
-install(FILES cmake/skipbuild.cmake DESTINATION lib/cmake/skipbuild)
+# skipbuild.cmake is installed next to Findskipbuild.cmake in both locations so
+# `find_package(skipbuild)` works in config mode and via CMAKE_MODULE_PATH.
+install(FILES
+    cmake/skipbuild.cmake
+    cmake/Findskipbuild.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/skipbuild
+)
+install(FILES
+    cmake/skipbuild.cmake
+    cmake/Findskipbuild.cmake
+    DESTINATION share/cmake/Modules
+)
 
 include(CMakePackageConfigHelpers)
 
 configure_package_config_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/skipbuild-config.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/skipbuild-config.cmake
-    INSTALL_DESTINATION lib/cmake/skipbuild
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/skipbuild
 )
 
 write_basic_package_version_file(
@@ -156,7 +206,5 @@ write_basic_package_version_file(
 install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/skipbuild-config.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/skipbuild-config-version.cmake
-    DESTINATION lib/cmake/skipbuild
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/skipbuild
 )
-
-install(FILES cmake/Findskipbuild.cmake DESTINATION share/cmake/Modules)

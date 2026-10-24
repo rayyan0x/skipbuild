@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-24
+
+### Highlights
+Packaging, CI and test-integrity release: installable CMake package with exported targets, fail-closed installers, a working composite action, release gating, and tests that actually exercise the CLI and multi-process cache.
+
+### Added
+- **Installable CMake package.** `install()` now ships every public header (`core.hpp`, `config.hpp`, `stats.hpp`, `remote.hpp`, `crypto.hpp`) and exports `skipbuild::core`, `skipbuild::skipbuild` and `skipbuild::libzstd_static`, so `find_package(skipbuild)` + `target_link_libraries(app PRIVATE skipbuild::core)` works from an installed tree instead of only in the source tree.
+- **Installer refuses unverified binaries.** Both install scripts treated a missing `SHA256SUMS` (or an asset absent from it) as "skip verification"; checksum lookup is now mandatory and fails closed, with the asset name matched exactly rather than by substring.
+- **Windows installer supports ARM64.** The asset was hardcoded to `skipbuild-windows-x64.exe`; it is now derived from the process architecture (`PROCESSOR_ARCHITEW6432`/`PROCESSOR_ARCHITECTURE`).
+
+### Fixed
+- **CMake integration module is self-consistent.** `Findskipbuild.cmake` was installed to `share/cmake/Modules` but included `skipbuild.cmake` from `lib/cmake/skipbuild`, so module-mode `find_package` failed; both files are now installed side by side in both locations. `skipbuild_enable()` also called an undefined `_add_executable_with_skipbuild_impl` on CMake < 3.19; it now applies the launcher to existing targets and warns instead.
+- **`skipbuild-config.cmake` is a real package config.** It self-assigned `SKIPBUILD_EXECUTABLE` and never loaded the exported targets; it now uses `@PACKAGE_INIT@`, includes `skipbuildTargets.cmake`, prefers the imported launcher, and calls `check_required_components()`.
+- **CMake minimum version matches the policies used.** `cmake_policy(SET CMP0135 NEW)` requires CMake 3.24 while the project claimed 3.20; the minimum is now 3.24 and the `CMAKE_POLICY_VERSION_MINIMUM` fallback no longer forces a cache entry.
+- **Composite action uses this repository.** `action.yml` still referenced `remake` (placeholder `yourname/remake` URLs, `REMAKE_CACHE_DIR`, `~/.cache/remake`, `remake-` cache keys) and never enabled the launcher; it now installs from the checked-out `scripts/`, sets `SKIPBUILD_CACHE_DIR`/`CMAKE_*_COMPILER_LAUNCHER`, and caches `~/.cache/skipbuild`. The stale duplicate `install.sh`/`install.ps1` at the repository root were removed.
+- **Windows installer PATH check is exact.** `-notlike "*$InstallDir*"` used wildcard matching (and appended to a `$null` user PATH); entries are now compared exactly.
+- **CI gates the release.** The sanitizer job was `continue-on-error` and the strict (warnings-as-errors) job never ran the tests, so `release` could publish a build that only the matrix job had validated; sanitizers are now blocking, `strict` runs `ctest`, and `release` requires `build`, `strict`, `sanitizers` and both launcher smoke jobs.
+- **Tests actually test something.** `test_simple` only printed state and `test_multiprocess` never started a second process (it counted failures and returned 0), so both passed unconditionally; `test_simple` is gone and `test_multiprocess` now spawns four real worker processes and fails on any worker error or corrupted entry. A new `cli_e2e_test` drives `skipbuild -- <compiler>` through miss -> hit -> header-edit invalidation.
+- **Removed dead development files.** `compile.bat`, `dummy_test.cpp`, `test.cpp`, `test_skipbuild.bat` and `verify_stats.ps1` were tracked scratch files containing absolute paths from a single developer machine.
+- **HTTP responses are bounded.** Both clients buffered the whole body with no limit, so a broken or hostile server could exhaust the build machine's memory; bodies are now capped at 512 MiB and oversized responses fail the request. The POSIX client also reports a receive error/timeout instead of silently restoring a truncated body.
+- **Remote artifacts are checksum-verified.** `meta.json` now records a SHA-256 of each uploaded artifact and downloads whose bytes do not match are rejected (legacy entries without checksums remain readable), so truncation or corruption cannot install a bad entry.
+- **`--disable-incremental-msbuild` actually applies.** The CLI flag populated the override struct but no mask bit existed and `load_config()` never read the value, so passing it had no effect; it now overrides `disable_incremental_msbuild` like the other booleans.
+- **Empty sidecars are not cached.** Zero-byte `.pdb`/`.idb`/`.dwo` placeholders were stored and advertised, making restores report an empty symbol file; they are now skipped on store.
+- **Failed stores leave no partial entry.** A failure while writing blobs or `meta.json` used to leave an unusable directory (and stale blobs) at the key path; when the entry did not already exist, everything created by the failed store is now removed.
+- **Pruning reclaims orphaned entries and temp files.** Directories without a `meta.json` (crashed/failed stores) were invisible to `collect_entries()` and never removed; `prune()` now deletes them (only when untouched for an hour, so an in-flight store is not disturbed) along with stale `*.tmp` files inside valid entries.
+- **A leftover temp file no longer purges a good entry.** `get()` treated any zero-byte non-`.zst` file as corruption; interrupted-write `*.tmp` files are now ignored (and swept by `prune()`), so a valid entry survives.
+- **Compile keys are unambiguous.** Key fields were concatenated with `|` without escaping, so `-I"a|b"` could collide with `-Ia -Ib`; fields are now length-prefixed. `::tolower` is also called through `unsigned char`, avoiding undefined behaviour on non-ASCII paths.
+- **Debug builds are not shared across checkouts.** Keys normalized the source root away even when `-g`/`/Zi` (or an absolute path used by `__FILE__`) embeds host-specific paths in the object; debug keys now include the absolute source and compilation directory, while `-g0` and ordinary builds keep cross-checkout reuse.
+- **`tellg()` failure is handled.** A `-1` result was converted to `size_t`, requesting a near-`SIZE_MAX` allocation when reading an artifact for upload; it is now treated as a read error.
+
 ## [0.6.0] - 2026-10-22
 
 ### Highlights

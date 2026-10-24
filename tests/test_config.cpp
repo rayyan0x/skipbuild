@@ -327,23 +327,26 @@ void test_config_with_cli_overrides() {
     fs::path project_dir = test_dir / "project";
     fs::create_directories(project_dir);
     fs::path project_config = project_dir / ".buildcache.conf";
-    std::ofstream(project_config) << "max_cache_size = 1G\ncompression_enabled = false\nread_only = true\n";
+    std::ofstream(project_config) << "max_cache_size = 1G\ncompression_enabled = false\nread_only = true\ndisable_incremental_msbuild = false\n";
     
     // CLI overrides (explicitly supplied, so they win)
     skipbuild::CacheConfig cli_override;
     cli_override.max_cache_size_bytes = 5LL * 1024 * 1024 * 1024; // 5G
     cli_override.compression_enabled = true;
     cli_override.read_only = false;
+    cli_override.disable_incremental_msbuild = true;
 
     skipbuild::CliOverrideMask mask;
     mask.compression_enabled = true;
     mask.read_only = true;
+    mask.disable_incremental_msbuild = true;
 
     auto config = skipbuild::ConfigParser::load_config(project_dir, cli_override, mask);
     
     assert(config.max_cache_size_bytes == 5LL * 1024 * 1024 * 1024);
     assert(config.compression_enabled == true);
     assert(config.read_only == false);
+    assert(config.disable_incremental_msbuild == true);
     
     std::cout << "  PASS: CLI overrides work for all fields\n";
 
@@ -355,6 +358,7 @@ void test_config_with_cli_overrides() {
     assert(config_partial.max_cache_size_bytes == 6LL * 1024 * 1024 * 1024);
     assert(config_partial.compression_enabled == false);  // from project config
     assert(config_partial.read_only == true);             // from project config
+    assert(config_partial.disable_incremental_msbuild == false);  // from project config
 
     std::cout << "  PASS: Unspecified CLI booleans keep config-file values\n";
     

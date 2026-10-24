@@ -1,6 +1,6 @@
-name: 'remake Build Cache'
+name: 'skipbuild Build Cache'
 description: 'Cache C++ object files across builds for faster compilation'
-author: 'remake'
+author: 'rayyan0x'
 
 inputs:
   cache-key:
@@ -8,62 +8,48 @@ inputs:
     required: false
     default: '${{ runner.os }}-${{ hashFiles(''**/CMakeLists.txt'') }}-${{ hashFiles(''**/*.cpp'', ''**/*.hpp'', ''**/*.h'') }}'
   cache-dir:
-    description: 'Cache directory'
+    description: 'Cache directory (passed as SKIPBUILD_CACHE_DIR)'
     required: false
-    default: '~/.cache/remake'
-  compiler:
-    description: 'Compiler to use (g++, clang++, cl.exe)'
-    required: false
-    default: ''
-  args:
-    description: 'Additional arguments passed to remake'
-    required: false
-    default: ''
+    default: '~/.cache/skipbuild'
 
 runs:
   using: 'composite'
   steps:
-    - name: Install remake
+    - name: Install skipbuild
       shell: bash
       run: |
+        set -euo pipefail
+        scripts_dir="$(cd "${GITHUB_ACTION_PATH}/../../scripts" && pwd)"
         if [ "${{ runner.os }}" = "Windows" ]; then
-          # Windows: download prebuilt binary
-          curl -fsSL https://github.com/yourname/remake/releases/latest/download/remake-windows-x86_64.zip -o remake.zip
-          unzip -q remake.zip -d $HOME/.local/bin
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          pwsh -NoProfile -File "$scripts_dir/install.ps1"
+          echo "${LOCALAPPDATA}\\skipbuild\\bin" >> "$GITHUB_PATH"
         else
-          # Linux/macOS: install via script
-          curl -fsSL https://github.com/yourname/remake/releases/latest/download/install.sh | bash -s -- --prefix $HOME/.local
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          bash "$scripts_dir/install.sh"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
         fi
-    
-    - name: Configure cache
+
+    - name: Configure cache directory
       shell: bash
       run: |
-        export REMAKE_CACHE_DIR="${{ inputs.cache-dir }}"
-        echo "REMAKE_CACHE_DIR=$REMAKE_CACHE_DIR" >> $GITHUB_ENV
-    
+        echo "SKIPBUILD_CACHE_DIR=${{ inputs.cache-dir }}" >> "$GITHUB_ENV"
+
+    - name: Enable compiler launcher
+      shell: bash
+      run: |
+        echo "CMAKE_C_COMPILER_LAUNCHER=skipbuild" >> "$GITHUB_ENV"
+        echo "CMAKE_CXX_COMPILER_LAUNCHER=skipbuild" >> "$GITHUB_ENV"
+
     - name: Restore cache
-      id: remake-cache
       uses: actions/cache@v4
       with:
         path: ${{ inputs.cache-dir }}
-        key: remake-${{ inputs.cache-key }}
+        key: skipbuild-${{ inputs.cache-key }}
         restore-keys: |
-          remake-${{ runner.os }}-
-    
-    - name: Build with remake
-      shell: bash
-      run: |
-        # If using CMake, remake is automatically used via CMAKE_CXX_COMPILER_LAUNCHER
-        # Otherwise, wrap your compile commands:
-        # remake -- g++ -c foo.cpp -o foo.o
-        echo "remake cache configured at ${{ inputs.cache-dir }}"
-        echo "Cache key: remake-${{ inputs.cache-key }}"
-        
+          skipbuild-${{ runner.os }}-
+
     - name: Save cache
       if: always()
       uses: actions/cache@v4
       with:
         path: ${{ inputs.cache-dir }}
-        key: remake-${{ inputs.cache-key }}
+        key: skipbuild-${{ inputs.cache-key }}

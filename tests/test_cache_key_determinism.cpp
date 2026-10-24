@@ -162,6 +162,56 @@ void test_cache_key_same_across_different_build_dirs() {
     fs::remove_all(test_dir2.parent_path());
 }
 
+void test_key_fields_cannot_alias() {
+    std::cout << "Testing key fields cannot collide across delimiters...\n";
+
+    fs::path test_dir = fs::temp_directory_path() / "remake-test-key-delim";
+    if (fs::exists(test_dir)) fs::remove_all(test_dir);
+    fs::create_directories(test_dir / "src");
+    std::ofstream(test_dir / "src" / "main.cpp") << "int main() { return 0; }";
+
+    auto key1 = skipbuild::Cache::compute_key(test_dir / "src" / "main.cpp",
+                                              {"a|b"}, {}, "test-compiler-hash",
+                                              skipbuild::CompilerType::GCC);
+    auto key2 = skipbuild::Cache::compute_key(test_dir / "src" / "main.cpp",
+                                              {"a", "b"}, {}, "test-compiler-hash",
+                                              skipbuild::CompilerType::GCC);
+    assert(key1.hash != key2.hash &&
+           "a delimiter inside a field must not alias two separate fields");
+
+    fs::remove_all(test_dir);
+    std::cout << "  PASS: delimiter-containing fields produce distinct keys\n";
+}
+
+void test_debug_info_keys_include_paths() {
+    std::cout << "Testing debug builds are not shared across checkouts...\n";
+
+    fs::path root = fs::temp_directory_path() / "remake-test-debug-keys";
+    fs::path dir1 = root / "user1" / "project";
+    fs::path dir2 = root / "user2" / "project";
+    if (fs::exists(root)) fs::remove_all(root);
+    fs::create_directories(dir1 / "src");
+    fs::create_directories(dir2 / "src");
+    std::ofstream(dir1 / "src" / "main.cpp") << "int main() { return 0; }";
+    std::ofstream(dir2 / "src" / "main.cpp") << "int main() { return 0; }";
+
+    auto src1 = dir1 / "src" / "main.cpp";
+    auto src2 = dir2 / "src" / "main.cpp";
+
+    auto debug1 = skipbuild::Cache::compute_key(src1, {}, {"-g"}, "hash", skipbuild::CompilerType::GCC);
+    auto debug2 = skipbuild::Cache::compute_key(src2, {}, {"-g"}, "hash", skipbuild::CompilerType::GCC);
+    assert(debug1.hash != debug2.hash &&
+           "debug objects embed absolute paths and must not share a key");
+
+    auto nodebug1 = skipbuild::Cache::compute_key(src1, {}, {"-g0"}, "hash", skipbuild::CompilerType::GCC);
+    auto nodebug2 = skipbuild::Cache::compute_key(src2, {}, {"-g0"}, "hash", skipbuild::CompilerType::GCC);
+    assert(nodebug1.hash == nodebug2.hash &&
+           "-g0 disables debug info, so cross-checkout reuse stays valid");
+
+    fs::remove_all(root);
+    std::cout << "  PASS: -g keys are path-sensitive, -g0 keys are not\n";
+}
+
 void test_environment_variable_hash() {
     std::cout << "Testing environment variable hash...\n";
     
@@ -467,6 +517,12 @@ int main(int argc, char* argv[]) {
     std::cout << "\n";
     
     test_cache_key_same_across_different_build_dirs();
+    std::cout << "\n";
+    
+    test_key_fields_cannot_alias();
+    std::cout << "\n";
+    
+    test_debug_info_keys_include_paths();
     std::cout << "\n";
     
     test_environment_variable_hash();

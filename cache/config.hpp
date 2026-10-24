@@ -45,6 +45,7 @@ struct CliOverrideMask {
     bool compression_enabled = false;
     bool read_only = false;
     bool remote_read_only = false;
+    bool disable_incremental_msbuild = false;
 };
 
 class ConfigParser {

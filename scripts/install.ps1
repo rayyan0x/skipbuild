@@ -22,19 +22,16 @@
     Downloads the latest skipbuild release and installs it to %LOCALAPPDATA%\skipbuild\bin.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.ps1 | iex
+    irm https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.ps1 -OutFile install.ps1; .\install.ps1
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.ps1 | iex -Version v0.1.0
+    .\install.ps1 -Version 0.6.1
 
 .PARAMETER Version
     Version tag to install (default: latest)
 
 .PARAMETER InstallDir
     Installation directory (default: $env:LOCALAPPDATA\skipbuild\bin)
-
-.PARAMETER BuildFromSource
-    If no prebuilt asset is available, explicitly allow a source build.
 #>
 
 param(
@@ -42,16 +39,22 @@ param(
     [string]$Version = "latest",
 
     [Parameter(Mandatory=$false)]
-    [string]$InstallDir = "$env:LOCALAPPDATA\skipbuild\bin",
-
-    [Parameter(Mandatory=$false)]
-    [switch]$BuildFromSource
+    [string]$InstallDir = "$env:LOCALAPPDATA\skipbuild\bin"
 )
 
 $ErrorActionPreference = 'Stop'
 
 $Repo = "rayyan0x/skipbuild"
-$Asset = "skipbuild-windows-x64.exe"
+
+# Detect the real OS architecture. A 32-bit PowerShell on 64-bit Windows reports
+# x86 in PROCESSOR_ARCHITECTURE, so prefer PROCESSOR_ARCHITEW6432.
+$arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+switch ($arch) {
+    'AMD64' { $Arch = 'x64' }
+    'ARM64' { $Arch = 'arm64' }
+    default { throw "Unsupported architecture: $arch" }
+}
+$Asset = "skipbuild-windows-$Arch.exe"
 
 # Resolve version
 if ($Version -eq "latest") {
@@ -59,15 +62,25 @@ if ($Version -eq "latest") {
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -ErrorAction Stop
         $Version = $release.tag_name -replace '^v', ''
     } catch {
-        Write-Error "Failed to determine latest version: $_"
-        exit 1
+        throw "Failed to determine latest version: $_"
     }
 }
 
-$Url = "https://github.com/rayyan0x/skipbuild/releases/download/v$Version/skipbuild-windows-x64.exe"
+$Url = "https://github.com/rayyan0x/skipbuild/releases/download/v$Version/$Asset"
 $SumsUrl = "https://github.com/rayyan0x/skipbuild/releases/download/v$Version/SHA256SUMS"
 
 Write-Host "Installing skipbuild v$Version to $InstallDir"
+
+# Exact PATH-entry comparison (a wildcard match breaks on usernames containing
+# bracket characters).
+function Test-PathContains([string]$PathValue, [string]$Dir) {
+    if ([string]::IsNullOrEmpty($PathValue)) { return $false }
+    $target = $Dir.TrimEnd('\')
+    foreach ($entry in $PathValue -split ';') {
+        if ($entry.TrimEnd('\') -ieq $target) { return $true }
+    }
+    return $false
+}
 
 # Create install directory
 if (-not (Test-Path $InstallDir)) {
@@ -81,19 +94,21 @@ try {
     Write-Host "Downloading from $Url"
     Invoke-WebRequest -Uri $Url -OutFile $TempFile -UseBasicParsing -ErrorAction Stop
 
-    # Verify checksum if available
-    try {
-        Invoke-WebRequest -Uri $SumsUrl -OutFile $SumFile -UseBasicParsing -ErrorAction Stop
-        $expected = (Get-Content $SumFile | Where-Object { $_ -like "*skipbuild-windows-x64.exe" }) -split '\s+' | Select-Object -First 1
-        $actual = (Get-FileHash -Path $TempFile -Algorithm SHA256).Hash.ToLower()
-        if ($expected -and $expected -ne $actual) {
-            Write-Error "Checksum mismatch! Expected $expected, got $actual"
-            exit 1
-        }
-        if ($expected) { Write-Host "Checksum verified" } else { Write-Warning "Asset not listed in SHA256SUMS; skipping verification" }
-    } catch {
-        Write-Warning "Could not verify checksum (SHA256SUMS not available): $_"
+    # Verification is mandatory: a missing sums file or an unlisted asset must
+    # not silently install an unverified binary.
+    Invoke-WebRequest -Uri $SumsUrl -OutFile $SumFile -UseBasicParsing -ErrorAction Stop
+    $expected = Get-Content $SumFile | ForEach-Object {
+        $parts = $_ -split '\s+', 2
+        if ($parts.Count -eq 2 -and $parts[1].TrimStart('*') -eq $Asset) { $parts[0] }
+    } | Select-Object -First 1
+    if (-not $expected) {
+        throw "Asset $Asset is not listed in SHA256SUMS; refusing to install an unverified binary."
     }
+    $actual = (Get-FileHash -Path $TempFile -Algorithm SHA256).Hash.ToLower()
+    if ($expected -ne $actual) {
+        throw "Checksum mismatch for $Asset (expected $expected, got $actual)!"
+    }
+    Write-Host "Checksum verified"
 
     # Install
     $dest = Join-Path $InstallDir "skipbuild.exe"
@@ -101,13 +116,13 @@ try {
     Write-Host "Installed skipbuild.exe to $dest"
 
     # Make it usable in THIS window immediately
-    if ($env:PATH -notlike "*$InstallDir*") {
+    if (-not (Test-PathContains $env:PATH $InstallDir)) {
         $env:PATH = "$InstallDir;$env:PATH"
     }
 
     # Persist for future terminals
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($userPath -notlike "*$InstallDir*") {
+    if (-not (Test-PathContains $userPath $InstallDir)) {
         [Environment]::SetEnvironmentVariable("Path", ($userPath + ";" + $InstallDir), "User")
         Write-Host "Added $InstallDir to your user PATH (applies to new terminals)."
     }

@@ -38,12 +38,14 @@ function(run_launcher out_var)
                 "SKIPBUILD_DIR=${cache}"
                 "SKIPBUILD_CACHE_DIR=${cache}"
                 "SKIPBUILD_DEBUG=1"
+                "SKIPBUILD_LOG_FILE=${work}/launcher.log"
                 "${SKIPBUILD}" -- "${COMPILER}" ${ARGN}
         WORKING_DIRECTORY "${work}"
         OUTPUT_VARIABLE out
         ERROR_VARIABLE err
         RESULT_VARIABLE rc
     )
+    message(STATUS "run rc=${rc} out=${out} err=${err}")
     if(NOT rc EQUAL 0)
         message(FATAL_ERROR "launcher exited with ${rc}\nstdout:\n${out}\nstderr:\n${err}")
     endif()
@@ -53,6 +55,11 @@ function(run_launcher out_var)
     set(${out_var} "${out}${err}" PARENT_SCOPE)
 endfunction()
 
+if(NOT EXISTS "${SKIPBUILD}")
+    message(FATAL_ERROR "launcher not found: ${SKIPBUILD}")
+endif()
+message(STATUS "skipbuild=${SKIPBUILD} compiler=${COMPILER} args=${compile_args}")
+
 run_launcher(first ${compile_args})
 if(first MATCHES "HIT")
     message(FATAL_ERROR "expected MISS on first compile, got:\n${first}")
@@ -60,7 +67,10 @@ endif()
 
 run_launcher(second ${compile_args})
 if(NOT second MATCHES "HIT")
-    message(FATAL_ERROR "expected HIT on second compile\nfirst:\n${first}\nsecond:\n${second}")
+    file(READ "${work}/launcher.log" launch_log OPTIONAL)
+    file(GLOB_RECURSE cached_files "${cache}/*")
+    list(LENGTH cached_files cached_count)
+    message(FATAL_ERROR "expected HIT on second compile\ncompiler: ${COMPILER}\nfirst:\n${first}\nsecond:\n${second}\ncached_files=${cached_count}\nlog:\n${launch_log}")
 endif()
 
 file(WRITE "${header}" "#define VAL 2\n")

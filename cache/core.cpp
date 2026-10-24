@@ -2641,6 +2641,11 @@ struct HttpResponse {
     std::string error;
 };
 
+// Hard cap on an HTTP response body buffered in memory. Cache artifacts are
+// compiled outputs; a malicious or broken server must not be able to exhaust
+// the client's RAM by streaming an unbounded response. Shared by both clients.
+static constexpr size_t kMaxHttpResponseBytes = static_cast<size_t>(512) * 1024 * 1024;
+
 #if defined(_WIN32)
 
 // RAII wrapper for WinHTTP handles
@@ -2699,11 +2704,6 @@ static std::wstring to_wide(const std::string& s) {
 }
 
 // WinHTTP client
-
-// Hard cap on an HTTP response body buffered in memory. Cache artifacts are
-// compiled outputs; a malicious or broken server must not be able to exhaust
-// the client's RAM by streaming an unbounded response.
-static constexpr size_t kMaxHttpResponseBytes = static_cast<size_t>(512) * 1024 * 1024;
 
 class WinHttpClient {
     WinHttpHandle session_;

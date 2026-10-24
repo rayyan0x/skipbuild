@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--disable-incremental-msbuild` actually applies.** The CLI flag populated the override struct but no mask bit existed and `load_config()` never read the value, so passing it had no effect; it now overrides `disable_incremental_msbuild` like the other booleans.
 - **Empty sidecars are not cached.** Zero-byte `.pdb`/`.idb`/`.dwo` placeholders were stored and advertised, making restores report an empty symbol file; they are now skipped on store.
 - **Failed stores leave no partial entry.** A failure while writing blobs or `meta.json` used to leave an unusable directory (and stale blobs) at the key path; when the entry did not already exist, everything created by the failed store is now removed.
+- **Pruning reclaims orphaned entries and temp files.** Directories without a `meta.json` (crashed/failed stores) were invisible to `collect_entries()` and never removed; `prune()` now deletes them (only when untouched for an hour, so an in-flight store is not disturbed) along with stale `*.tmp` files inside valid entries.
+- **A leftover temp file no longer purges a good entry.** `get()` treated any zero-byte non-`.zst` file as corruption; interrupted-write `*.tmp` files are now ignored (and swept by `prune()`), so a valid entry survives.
+- **Compile keys are unambiguous.** Key fields were concatenated with `|` without escaping, so `-I"a|b"` could collide with `-Ia -Ib`; fields are now length-prefixed. `::tolower` is also called through `unsigned char`, avoiding undefined behaviour on non-ASCII paths.
+- **Debug builds are not shared across checkouts.** Keys normalized the source root away even when `-g`/`/Zi` (or an absolute path used by `__FILE__`) embeds host-specific paths in the object; debug keys now include the absolute source and compilation directory, while `-g0` and ordinary builds keep cross-checkout reuse.
+- **`tellg()` failure is handled.** A `-1` result was converted to `size_t`, requesting a near-`SIZE_MAX` allocation when reading an artifact for upload; it is now treated as a read error.
 
 ## [0.6.0] - 2026-10-22
 

@@ -375,6 +375,37 @@ void test_cache_restore_failure_fallback() {
     fs::remove_all(test_dir);
 }
 
+void test_stale_temp_file_not_corruption() {
+    std::cout << "Testing stale temp file does not invalidate an entry...\n";
+
+    fs::path test_dir = fs::temp_directory_path() / "remake-test-stale-temp";
+    if (fs::exists(test_dir)) fs::remove_all(test_dir);
+    fs::create_directories(test_dir);
+
+    skipbuild::Cache cache(test_dir);
+
+    fs::path src = test_dir / "stale.cpp";
+    std::ofstream(src) << "int stale;";
+    fs::path obj = test_dir / "stale.o";
+    std::ofstream(obj) << std::string(128, 's');
+
+    auto key = skipbuild::Cache::compute_key(src, {}, {"-O2"}, "test-compiler-stale");
+    assert(cache.put(key, {obj}));
+
+    // A failed write can leave a zero-byte "*.tmp" file behind. It is not an
+    // artifact, so a later lookup must not purge the whole entry.
+    fs::path key_dir = test_dir / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+    std::ofstream(key_dir / "cache_stale.o_1_2.tmp") << "";
+
+    auto entry = cache.get(key);
+    assert(entry.has_value() && "stale temp file must not be treated as corruption");
+    assert(entry->outputs.size() == 1 && "the real output must still be restored");
+    cache.release(*entry);
+
+    fs::remove_all(test_dir);
+    std::cout << "  PASS: stale temp file ignored\n";
+}
+
 int main() {
     std::cout << "=== Resiliency & Fail-Safe Fallback Tests ===\n\n";
     
@@ -385,6 +416,9 @@ int main() {
     std::cout << "\n";
     
     test_file_lock_release_and_relock();
+    std::cout << "\n";
+
+    test_stale_temp_file_not_corruption();
     std::cout << "\n";
     
     test_cache_put_failure_disk_full_simulation();

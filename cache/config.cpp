@@ -125,14 +125,14 @@ int64_t ConfigParser::parse_size(const std::string& size_str) {
 
 bool ConfigParser::parse_bool(const std::string& bool_str) {
     std::string s = trim(bool_str);
-    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return s == "true" || s == "1" || s == "yes" || s == "on";
 }
 
 void ConfigParser::apply_values(CacheConfig& config, const std::map<std::string, std::string>& values) {
     for (const auto& [key, value] : values) {
         std::string lower_key = key;
-        std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
+        std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         
         if (lower_key == "max_cache_size" || lower_key == "max_size") {
             config.max_cache_size_bytes = parse_size(value);

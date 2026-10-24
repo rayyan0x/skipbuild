@@ -38,14 +38,26 @@
 namespace fs = std::filesystem;
 namespace skipbuild {
 
+// std::tolower must be called with an unsigned char value; passing a negative
+// (non-ASCII UTF-8) char is undefined behaviour.
+static char ascii_tolower(char c) {
+    return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+}
+
 // Helper functions for remote cache integration
 static bool read_file(const fs::path& path, std::vector<uint8_t>& data) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return false;
     std::streamsize size = f.tellg();
+    // tellg() reports -1 on failure; resizing to that (as size_t) would request
+    // a near-SIZE_MAX allocation. Treat it as a read error instead.
+    if (size < 0) return false;
     f.seekg(0, std::ios::beg);
-    data.resize(size);
-    f.read(reinterpret_cast<char*>(data.data()), size);
+    if (!f) return false;
+    data.resize(static_cast<size_t>(size));
+    if (size > 0) {
+        f.read(reinterpret_cast<char*>(data.data()), size);
+    }
     return f.good();
 }
 
@@ -667,6 +679,35 @@ static std::vector<std::tuple<std::string, SidecarType, std::string>> parse_side
     return sidecars;
 }
 
+// Append one key field, length-prefixed so a value containing the delimiter
+// cannot alias a different field split (e.g. {"a|b"} vs {"a","b"}).
+static void append_key_field(std::ostringstream& oss, const std::string& value) {
+    oss << value.size() << ':' << value << '|';
+}
+
+// True when the command asks for debug info (-g/-g1/-ggdb/... but not -g0, and
+// MSVC /Zi, /ZI, /Z7). Such objects embed host paths, so they must not share a
+// key across checkouts.
+static bool has_debug_info_flags(const std::vector<std::string>& flags) {
+    for (const auto& f : flags) {
+        if (f == "-g") return true;
+        if (f.size() > 2 && f[0] == '-' && f[1] == 'g' && f[2] != '0') return true;
+        std::string lf = f;
+        std::transform(lf.begin(), lf.end(), lf.begin(), ascii_tolower);
+        if (lf == "/zi" || lf == "/z7") return true;
+    }
+    return false;
+}
+
+// __FILE__ expands to the source path exactly as passed to the compiler, so an
+// absolute argument makes the object depend on that absolute path.
+static bool source_uses_file_macro(const std::filesystem::path& source) {
+    std::ifstream f(source, std::ios::binary);
+    if (!f) return false;
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return content.find("__FILE__") != std::string::npos;
+}
+
 CacheKey Cache::compute_key(const std::filesystem::path& source,
                             const std::vector<std::string>& includes,
                             const std::vector<std::string>& flags,
@@ -680,6 +721,23 @@ CacheKey Cache::compute_key(const std::filesystem::path& source,
     // Normalize source path for key
     auto build_root = find_build_root(source);
     std::string norm_source = normalize_path_for_key(source, build_root);
+
+    // An absolute source argument appears verbatim in __FILE__, and debug info
+    // records the compilation directory. Both embed a host-specific path in the
+    // object, so stripping the root would alias checkouts with different paths
+    // but otherwise identical inputs.
+    const bool debug_info = has_debug_info_flags(flags);
+    std::string compile_dir;
+    if (debug_info || (source.is_absolute() && source_uses_file_macro(source))) {
+        std::error_code ec;
+        auto abs_source = std::filesystem::absolute(source, ec);
+        if (!ec) norm_source = abs_source.lexically_normal().string();
+    }
+    if (debug_info) {
+        std::error_code ec;
+        auto cwd = std::filesystem::current_path(ec);
+        if (!ec) compile_dir = cwd.lexically_normal().string();
+    }
     
     // Normalize include paths. Include order determines header resolution, so the
     // command-line order is preserved (do NOT sort).
@@ -697,16 +755,18 @@ CacheKey Cache::compute_key(const std::filesystem::path& source,
     std::string env_hash = get_relevant_env_hash();
 
     std::ostringstream oss;
-    oss << source_hash << "|" << norm_source;
+    append_key_field(oss, source_hash);
+    append_key_field(oss, norm_source);
     for (const auto& inc : norm_includes) {
-        oss << "|" << inc;
+        append_key_field(oss, inc);
     }
     for (const auto& flag : norm_flags) {
-        oss << "|" << flag;
+        append_key_field(oss, flag);
     }
-    oss << "|" << compiler_hash;
-    oss << "|" << static_cast<int>(compiler_type);
-    oss << "|" << env_hash;
+    append_key_field(oss, compiler_hash);
+    append_key_field(oss, std::to_string(static_cast<int>(compiler_type)));
+    append_key_field(oss, env_hash);
+    append_key_field(oss, compile_dir);
 
     CacheKey key;
     key.hash = compute_sha256(oss.str());
@@ -769,6 +829,12 @@ static std::filesystem::path make_temp_path(const std::filesystem::path& base_di
     std::ostringstream oss;
     oss << prefix << "_" << std::this_thread::get_id() << "_" << std::chrono::steady_clock::now().time_since_epoch().count() << ".tmp";
     return base_dir / oss.str();
+}
+
+// A leftover in-progress file from an interrupted write is not a cache artifact;
+// scanning code must ignore it instead of treating the entry as corrupt.
+static bool is_temp_file(const std::filesystem::path& path) {
+    return path.extension() == ".tmp";
 }
 
 // Store one artifact in an entry directory, compressed or raw, via a temp file
@@ -1253,6 +1319,7 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
 
                     for (auto& f : std::filesystem::directory_iterator(key_dir, ec)) {
                         if (f.is_directory(ec)) continue;
+                        if (is_temp_file(f.path())) continue;  // interrupted write, not an artifact
                         if (f.path().filename() != "meta.json" && f.path().filename() != ".lock") {
                             auto size = std::filesystem::file_size(f.path(), ec);
                             if (size == 0) {
@@ -1413,6 +1480,51 @@ static int64_t file_time_to_unix_nanos(std::filesystem::file_time_type ftime) {
         (sys_now + delta).time_since_epoch()).count();
 }
 
+// Remove leftovers from interrupted stores: entry directories that never got a
+// meta.json (invisible to collect_entries()/prune, so they would leak forever)
+// and "*.tmp" files inside otherwise valid entries. Only directories untouched
+// for an hour are considered, which avoids racing a store that has created its
+// directory but not yet taken the entry lock.
+static void sweep_orphaned_entries(const std::filesystem::path& root) {
+    std::error_code ec;
+    if (!std::filesystem::exists(root, ec)) return;
+
+    const int64_t now_ns = static_cast<int64_t>(std::time(nullptr)) * 1000000000LL;
+    constexpr int64_t kStaleNanos = 3600LL * 1000000000LL;
+
+    for (auto& d1 : std::filesystem::directory_iterator(root, ec)) {
+        if (!d1.is_directory(ec)) continue;
+        for (auto& d2 : std::filesystem::directory_iterator(d1.path(), ec)) {
+            if (!d2.is_directory(ec)) continue;
+            for (auto& d3 : std::filesystem::directory_iterator(d2.path(), ec)) {
+                if (!d3.is_directory(ec)) continue;
+
+                std::filesystem::path key_dir = d3.path();
+                std::error_code lec;
+                auto mtime = std::filesystem::last_write_time(key_dir, lec);
+                if (lec) continue;
+                if (now_ns - file_time_to_unix_nanos(mtime) < kStaleNanos) continue;
+
+                FileLock file_lock(key_dir / ".lock");
+                FileLock::ScopedLock scoped_lock(file_lock, FileLock::LockType::Exclusive);
+                if (!scoped_lock) continue;
+
+                if (!std::filesystem::exists(key_dir / "meta.json")) {
+                    std::error_code rm_ec;
+                    std::filesystem::remove_all(key_dir, rm_ec);
+                    continue;
+                }
+                for (auto& f : std::filesystem::directory_iterator(key_dir, lec)) {
+                    if (f.is_regular_file(lec) && is_temp_file(f.path())) {
+                        std::error_code rm_ec;
+                        std::filesystem::remove(f.path(), rm_ec);
+                    }
+                }
+            }
+        }
+    }
+}
+
 std::vector<Cache::EntryMeta> Cache::collect_entries() const {
     std::vector<EntryMeta> entries;
     std::error_code ec;
@@ -1431,7 +1543,7 @@ std::vector<Cache::EntryMeta> Cache::collect_entries() const {
                     meta.last_access = meta.timestamp;
                     for (auto& f : std::filesystem::directory_iterator(d3.path(), ec)) {
                         auto name = f.path().filename();
-                        if (name == "meta.json" || name == ".lock") continue;
+                        if (name == "meta.json" || name == ".lock" || is_temp_file(f.path())) continue;
                         // Skip a decompressed copy that duplicates a compressed
                         // blob already in this entry, so the on-disk accounting
                         // reflects the stored (compressed) size.
@@ -1468,6 +1580,9 @@ void Cache::prune(int64_t max_size_bytes, int max_age_days) {
     if (max_age_days < 0) max_age_days = config_.max_age_days;
     double target_ratio = config_.eviction_target_ratio;
     
+    // Reclaim space from failed stores before doing the accounting.
+    sweep_orphaned_entries(root_);
+
     auto entries = collect_entries();
     if (entries.empty()) return;
     
@@ -1485,7 +1600,8 @@ void Cache::prune(int64_t max_size_bytes, int max_age_days) {
             // Check for zero-byte or missing object files
             bool has_valid_output = false;
             for (auto& f : std::filesystem::directory_iterator(e.path, ec)) {
-                if (f.path().filename() != "meta.json" && f.path().filename() != ".lock") {
+                if (f.path().filename() != "meta.json" && f.path().filename() != ".lock" &&
+                    !is_temp_file(f.path())) {
                     auto size = std::filesystem::file_size(f.path(), ec);
                     if (size > 0) {
                         has_valid_output = true;
@@ -1598,7 +1714,7 @@ CompilerInfo detect_compiler(const std::string& compiler_path) {
     info.path = compiler_path;
     
     std::string name = std::filesystem::path(compiler_path).filename().string();
-    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    std::transform(name.begin(), name.end(), name.begin(), ascii_tolower);
     
     if (name.find("cl.exe") != std::string::npos || name.find("clang-cl") != std::string::npos) {
         info.type = CompilerType::MSVC;
@@ -2075,7 +2191,7 @@ CacheKey compute_pch_key(const CompileCommand& cmd) {
 
 LinkerType detect_linker_type(const std::string& linker_path) {
     std::string name = std::filesystem::path(linker_path).filename().string();
-    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    std::transform(name.begin(), name.end(), name.begin(), ascii_tolower);
     
     if (name.find("link.exe") != std::string::npos || name.find("lld-link") != std::string::npos) {
         return LinkerType::MSVC;
@@ -2124,24 +2240,25 @@ std::optional<LinkerCommand> parse_linker_command(int argc, char* argv[]) {
 
 CacheKey compute_linker_key(const LinkerCommand& cmd) {
     std::ostringstream oss;
-    oss << "link|" << static_cast<int>(cmd.type) << "|";
+    append_key_field(oss, "link");
+    append_key_field(oss, std::to_string(static_cast<int>(cmd.type)));
 
     // Inputs: keep the command-line order (it is significant for static
     // libraries / --start-group) and fold in the *content* hash of each input so
     // that recompiling or editing an object/library invalidates the entry. The
     // path itself is hashed normalized so the key stays machine-independent.
     for (const auto& input : cmd.inputs) {
-        oss << normalize_path_for_key(input) << "|";
+        append_key_field(oss, normalize_path_for_key(input));
         std::string h = compute_file_hash(input);
-        oss << (h.empty() ? std::string("nohash") : h) << "|";
+        append_key_field(oss, h.empty() ? std::string("nohash") : h);
     }
 
     // Libraries and search directories: order is significant, so do not sort.
     for (const auto& lib : cmd.libraries) {
-        oss << lib << "|";
+        append_key_field(oss, lib);
     }
     for (const auto& dir : cmd.library_dirs) {
-        oss << dir << "|";
+        append_key_field(oss, dir);
     }
 
     // Remaining flags/args (everything that is not an input or the output, both
@@ -2158,18 +2275,16 @@ CacheKey compute_linker_key(const LinkerCommand& cmd) {
             }
         }
         if (!covered) {
-            oss << a << "|";
+            append_key_field(oss, a);
         }
     }
 
     // Normalize output path
-    std::string norm_output = normalize_path_for_key(cmd.output);
-    oss << norm_output << "|";
-    oss << cmd.linker_hash << "|";
+    append_key_field(oss, normalize_path_for_key(cmd.output));
+    append_key_field(oss, cmd.linker_hash);
 
     // Include relevant environment hash
-    std::string env_hash = get_relevant_env_hash();
-    oss << env_hash;
+    append_key_field(oss, get_relevant_env_hash());
 
     CacheKey key;
     key.hash = compute_sha256(oss.str());
@@ -2305,7 +2420,7 @@ std::string normalize_path_for_key(const std::filesystem::path& path, const std:
     
     // On Windows, normalize case (lowercase)
     #ifdef _WIN32
-    std::transform(path_str.begin(), path_str.end(), path_str.begin(), ::tolower);
+    std::transform(path_str.begin(), path_str.end(), path_str.begin(), ascii_tolower);
     #endif
     
     // Strip build root prefix if provided
@@ -2316,7 +2431,7 @@ std::string normalize_path_for_key(const std::filesystem::path& path, const std:
         std::string root_str = root_canon.string();
         std::replace(root_str.begin(), root_str.end(), '\\', '/');
         #ifdef _WIN32
-        std::transform(root_str.begin(), root_str.end(), root_str.begin(), ::tolower);
+        std::transform(root_str.begin(), root_str.end(), root_str.begin(), ascii_tolower);
         #endif
         
         if (path_str.rfind(root_str, 0) == 0) {  // starts with root_str
@@ -3496,7 +3611,7 @@ RemoteCache::Config RemoteCache::from_env() {
     
     if (const char* env = get_env("SKIPBUILD_REMOTE_READ_ONLY", "BUILDCACHE_REMOTE_READ_ONLY")) {
         std::string v = env;
-        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        std::transform(v.begin(), v.end(), v.begin(), ascii_tolower);
         config.read_only = (v == "1" || v == "true" || v == "yes" || v == "on");
     }
     
@@ -3518,13 +3633,13 @@ RemoteCache::Config RemoteCache::from_env() {
     
     if (const char* env = get_env("SKIPBUILD_REMOTE_VERIFY_SSL", "BUILDCACHE_REMOTE_VERIFY_SSL")) {
         std::string v = env;
-        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        std::transform(v.begin(), v.end(), v.begin(), ascii_tolower);
         config.verify_ssl = (v == "1" || v == "true" || v == "yes" || v == "on");
     }
     
     if (const char* env = get_env("SKIPBUILD_REMOTE_ALLOW_INSECURE", "BUILDCACHE_REMOTE_ALLOW_INSECURE")) {
         std::string v = env;
-        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        std::transform(v.begin(), v.end(), v.begin(), ascii_tolower);
         config.allow_insecure = (v == "1" || v == "true" || v == "yes" || v == "on");
     }
     
@@ -3604,7 +3719,7 @@ void init_log_level() {
     }
 
     std::string level = env;
-    std::transform(level.begin(), level.end(), level.begin(), ::tolower);
+    std::transform(level.begin(), level.end(), level.begin(), ascii_tolower);
     if (level == "debug" || level == "4") {
         g_log_level = LogLevel::Debug;
     } else if (level == "info" || level == "3") {

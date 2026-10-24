@@ -238,11 +238,66 @@ static void test_prune_lru_target_and_no_double_count() {
     fs::remove_all(cdir);
 }
 
+// 5. prune() reclaims directories left behind by failed stores (no meta.json)
+//    and stale "*.tmp" files inside otherwise valid entries.
+static void test_orphan_and_temp_cleanup() {
+    std::cout << "Testing orphan directory and stale temp cleanup...\n";
+
+    fs::path work = fs::temp_directory_path() / "skipbuild-orphan-work";
+    fs::path cdir = fs::temp_directory_path() / "skipbuild-orphan-cache";
+    fs::remove_all(work);
+    fs::remove_all(cdir);
+    fs::create_directories(work);
+    fs::create_directories(cdir);
+
+    skipbuild::CacheConfig config;
+    config.max_cache_size_bytes = 1024 * 1024;
+    config.max_age_days = 30;
+    skipbuild::Cache cache(cdir, config);
+
+    // A store that failed before writing meta.json leaves blobs behind. Such a
+    // directory is invisible to collect_entries() and would leak forever.
+    fs::path orphan = cdir / "ab" / "cd" / "abcdef";
+    fs::create_directories(orphan);
+    std::ofstream(orphan / "partial.o.zst") << "partial";
+    auto stale_time = fs::file_time_type::clock::now() - std::chrono::hours(2);
+    fs::last_write_time(orphan, stale_time);
+
+    // A valid entry that also contains a leftover temp file.
+    fs::path src = work / "keep.cpp";
+    std::ofstream(src) << "int keep;";
+    fs::path obj = work / "keep.o";
+    std::ofstream(obj) << std::string(64, 'k');
+    auto key = skipbuild::Cache::compute_key(src, {}, {"-O2"}, "test-compiler-orphan");
+    assert(cache.put(key, {obj}));
+
+    fs::path key_dir = cdir / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
+    fs::path stale_tmp = key_dir / "cache_keep.o_1_2.tmp";
+    std::ofstream(stale_tmp) << "";
+    fs::last_write_time(key_dir, stale_time);
+
+    cache.prune();
+
+    assert(!fs::exists(orphan) && "orphan entry directory must be removed");
+    assert(!fs::exists(stale_tmp) && "stale temp file must be removed");
+    assert(fs::exists(key_dir / "meta.json") && "valid entry must be kept");
+
+    auto entry = cache.get(key);
+    assert(entry.has_value() && "valid entry must remain readable");
+    cache.release(*entry);
+
+    std::cout << "  PASS: orphan directory and stale temp file removed\n";
+
+    fs::remove_all(work);
+    fs::remove_all(cdir);
+}
+
 int main() {
     test_auto_clear_to_zero();
     test_transient_decompression();
     test_prune_age_below_size_limit();
     test_prune_lru_target_and_no_double_count();
+    test_orphan_and_temp_cleanup();
     std::cout << "\nAll auto-clear tests passed!\n";
     return 0;
 }

@@ -38,7 +38,6 @@ function(run_launcher out_var)
                 "SKIPBUILD_DIR=${cache}"
                 "SKIPBUILD_CACHE_DIR=${cache}"
                 "SKIPBUILD_DEBUG=1"
-                "SKIPBUILD_E2E_DIAG=1"
                 "SKIPBUILD_LOG_FILE=${work}/launcher.log"
                 "${SKIPBUILD}" -- "${COMPILER}" ${ARGN}
         WORKING_DIRECTORY "${work}"

@@ -415,9 +415,6 @@ static std::optional<std::vector<std::string>> discover_dependencies(
     if (type == skipbuild::CompilerType::MSVC) vslang.emplace();
 #endif
     if (!capture_argv(dep_args, output, exit_code)) return std::nullopt;
-    if (std::getenv("SKIPBUILD_E2E_DIAG")) {
-        std::cerr << "[DIAG] deps rc=" << exit_code << " bytes=" << output.size() << "\n";
-    }
 
     std::vector<std::string> deps;
     std::istringstream iss(output);
@@ -836,12 +833,6 @@ int main(int argc, char* argv[]) {
     std::string cmd_full = find_compiler_in_path(cmd_name);
     compiler_argv[0] = const_cast<char*>(cmd_full.c_str());
     
-    if (std::getenv("SKIPBUILD_E2E_DIAG")) {
-        std::cerr << "[DIAG] argc=" << argc << " sep=" << sep << " compiler_argc=" << compiler_argc << "\n";
-        for (int i = 0; i < compiler_argc; ++i) std::cerr << "[DIAG] arg[" << i << "]=" << compiler_argv[i] << "\n";
-        const char* dis = std::getenv("SKIPBUILD_DISABLE");
-        std::cerr << "[DIAG] disable=" << (dis ? dis : "(unset)") << "\n";
-    }
 
     // A compile-only invocation (-c on GCC/Clang, /c on MSVC) is never a link,
     // even when the driver is a C++ compiler such as g++/clang++ that also acts
@@ -954,9 +945,6 @@ int main(int argc, char* argv[]) {
     
     // Compiler command
     auto cmd = skipbuild::parse_compile_command(compiler_argc, compiler_argv);
-    if (std::getenv("SKIPBUILD_E2E_DIAG")) {
-        std::cerr << "[DIAG] parse=" << (cmd ? "ok" : "null") << "\n";
-    }
     if (!cmd) {
         // Not a compile command we understand, passthrough
         std::vector<std::string> args(compiler_argv, compiler_argv + compiler_argc);

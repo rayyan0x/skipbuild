@@ -110,6 +110,25 @@ int main() {
     auto k3 = key_with_deps({header.string()});
     check(k2.hash == k3.hash, "unchanged header keeps the key stable");
 
+    // Absolute POSIX paths start with '/', which must not be mistaken for MSVC
+    // flags (/D..., /U..., /I..., /F...). Regression: a source under /Users was
+    // parsed as a /U define and every macOS compile bypassed the cache.
+    {
+        std::vector<std::string> full = {
+            "c++", "-c", "-I", "/Users/dev/project",
+            "/Users/dev/project/a.cpp", "-o", "a.o"};
+        std::vector<char*> argv;
+        for (auto& a : full) argv.push_back(const_cast<char*>(a.c_str()));
+        auto cmd = skipbuild::parse_compile_command(static_cast<int>(argv.size()), argv.data());
+        check(cmd.has_value(), "absolute POSIX source path is recognized as a compile command");
+        if (cmd) {
+            check(cmd->source == "/Users/dev/project/a.cpp",
+                  "absolute POSIX source path is not swallowed as an MSVC /U or /D flag");
+            check(cmd->includes.size() == 1 && cmd->includes[0] == "/Users/dev/project",
+                  "absolute POSIX -I directory is parsed as an include dir");
+        }
+    }
+
     fs::remove_all(dir, ec);
 
     if (failures) {

@@ -1924,21 +1924,27 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
     
     CompileCommand cmd;
     bool is_compile = false;
+
+    // MSVC-only flag spellings. On POSIX an absolute path starts with '/', so
+    // treating "/D...", "/U...", "/I...", "/F..." as MSVC flags would swallow
+    // sources such as /Users/... or /home/... . Gate them on the compiler.
+    const bool msvc = !expanded_argv.empty() &&
+        detect_compiler(expanded_argv[0]).type == CompilerType::MSVC;
     
     for (int i = 1; i < expanded_argc; ++i) {
         std::string arg = expanded_argv[i];
         if (arg == "-c" || arg == "/c") {
             is_compile = true;
             cmd.args.push_back(arg);
-        } else if ((arg == "-o" || arg == "/Fo") && i + 1 < expanded_argc) {
+        } else if ((arg == "-o" || (msvc && arg == "/Fo")) && i + 1 < expanded_argc) {
             cmd.output = expanded_argv[++i];
             cmd.args.push_back(arg);
             cmd.args.push_back(expanded_argv[i]);
-        } else if ((arg.rfind("-I", 0) == 0 || arg.rfind("/I", 0) == 0) && arg.size() > 2) {
+        } else if ((arg.rfind("-I", 0) == 0 || (msvc && arg.rfind("/I", 0) == 0)) && arg.size() > 2) {
             std::string prefix = arg.rfind("-I", 0) == 0 ? "-I" : "/I";
             cmd.includes.push_back(arg.substr(prefix.size()));
             cmd.args.push_back(arg);
-        } else if ((arg == "-I" || arg == "/I") && i + 1 < expanded_argc) {
+        } else if ((arg == "-I" || (msvc && arg == "/I")) && i + 1 < expanded_argc) {
             cmd.includes.push_back(expanded_argv[++i]);
             cmd.args.push_back(arg);
             cmd.args.push_back(expanded_argv[i]);
@@ -1949,18 +1955,18 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
             cmd.args.push_back(expanded_argv[i]);
             cmd.flags.push_back(arg);
         } else if (((arg.rfind("-D", 0) == 0 || arg.rfind("-U", 0) == 0) && arg.size() > 2) ||
-                   ((arg.rfind("/D", 0) == 0 || arg.rfind("/U", 0) == 0) && arg.size() > 2 && arg.rfind("/DEFAULTLIB:", 0) != 0)) {
+                   (msvc && ((arg.rfind("/D", 0) == 0 || arg.rfind("/U", 0) == 0) && arg.size() > 2 && arg.rfind("/DEFAULTLIB:", 0) != 0))) {
             // Preprocessor defines/undefines in attached form (e.g. -DFOO=1, /DWIN32)
             cmd.flags.push_back(arg);
             cmd.args.push_back(arg);
-        } else if ((arg == "-D" || arg == "-U" || arg == "/D" || arg == "/U") && i + 1 < expanded_argc) {
+        } else if ((arg == "-D" || arg == "-U" || (msvc && (arg == "/D" || arg == "/U"))) && i + 1 < expanded_argc) {
             // Preprocessor defines/undefines in separate form
             cmd.flags.push_back(arg);
             cmd.args.push_back(arg);
             cmd.flags.push_back(expanded_argv[i + 1]);
             cmd.args.push_back(expanded_argv[++i]);
-        } else if (arg.rfind("/Fd", 0) == 0 || arg.rfind("/Fe", 0) == 0 || arg.rfind("/Fm", 0) == 0 ||
-                   arg.rfind("/FR", 0) == 0 || arg.rfind("/Fa", 0) == 0 || arg.rfind("/Fi", 0) == 0) {
+        } else if (msvc && (arg.rfind("/Fd", 0) == 0 || arg.rfind("/Fe", 0) == 0 || arg.rfind("/Fm", 0) == 0 ||
+                   arg.rfind("/FR", 0) == 0 || arg.rfind("/Fa", 0) == 0 || arg.rfind("/Fi", 0) == 0)) {
             // MSVC output/side-effect paths (PDB, exe, map, browse, listing, preprocessed):
             // passed through, but excluded from the key so it stays machine-independent.
             cmd.args.push_back(arg);
@@ -1970,12 +1976,12 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
         } else if (arg.rfind("-std=", 0) == 0 || arg.rfind("-O", 0) == 0 || arg.rfind("-g", 0) == 0 || arg.rfind("-Wall", 0) == 0 || arg.rfind("-W", 0) == 0) {
             cmd.flags.push_back(arg);
             cmd.args.push_back(arg);
-        } else if (arg == "/Zi" || arg == "/ZI") {
+        } else if (msvc && (arg == "/Zi" || arg == "/ZI")) {
             // MSVC debug info flags
             cmd.flags.push_back(arg);
             cmd.args.push_back(arg);
             cmd.has_debug_info = true;
-        } else if (arg.rfind("/Fo", 0) == 0) {
+        } else if (msvc && arg.rfind("/Fo", 0) == 0) {
             // MSVC output file: /Fo<path> or /Fo <path>
             cmd.flags.push_back(arg);
             cmd.args.push_back(arg);
@@ -1998,7 +2004,7 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
                 cmd.expected_sidecars.push_back(dwo_path.string());
                 cmd.expected_sidecar_types.push_back(SidecarType::DWO);
             }
-        } else if (arg.rfind("/Yc", 0) == 0 || arg.rfind("/Yu", 0) == 0) {
+        } else if (msvc && (arg.rfind("/Yc", 0) == 0 || arg.rfind("/Yu", 0) == 0)) {
             // MSVC PCH: /Yc (create) / Yu (use), optionally with an attached
             // header name, e.g. /Yc"pch.h", /Ycpch.h or /Yu"stdafx.h".
             bool create = arg.rfind("/Yc", 0) == 0;
@@ -2012,7 +2018,7 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
             if (!attached.empty()) {
                 cmd.pch.pch_source = attached;
             }
-        } else if (arg.rfind("/Fp", 0) == 0) {
+        } else if (msvc && arg.rfind("/Fp", 0) == 0) {
             // MSVC PCH output/input file: /Fp<path> or /Fp <path>
             cmd.flags.push_back(arg);
             cmd.args.push_back(arg);
@@ -2023,7 +2029,7 @@ std::optional<CompileCommand> parse_compile_command(int argc, char* argv[]) {
                 cmd.pch.pch_output = expanded_argv[++i];
                 cmd.args.push_back(cmd.pch.pch_output.string());
             }
-        } else if (arg == "/Y-") {
+        } else if (msvc && arg == "/Y-") {
             // MSVC: disable PCH for this file
             cmd.flags.push_back(arg);
             cmd.args.push_back(arg);

@@ -27,7 +27,8 @@ if command -v sha256sum >/dev/null 2>&1; then
 elif command -v shasum >/dev/null 2>&1; then
     SHA256="shasum -a 256"
 else
-    SHA256=""
+    echo "No SHA-256 tool found (sha256sum or shasum); refusing to install an unverified binary." >&2
+    exit 1
 fi
 
 # Resolve version
@@ -49,20 +50,28 @@ mkdir -p "$INSTALL_DIR"
 
 # Download binary
 TMP=$(mktemp)
-trap 'rm -f "$TMP"' EXIT
+SUMS_TMP="$TMP.sha256"
+trap 'rm -f "$TMP" "$SUMS_TMP"' EXIT
 curl -fsSL "$URL" -o "$TMP"
 chmod +x "$TMP"
 
-# Verify checksum if available
-if [ -n "$SHA256" ] && curl -fsSL "$SUMS_URL" -o "$TMP.sha256" 2>/dev/null; then
-    EXPECTED=$(grep "$ASSET" "$TMP.sha256" | awk '{print $1}')
-    ACTUAL=$($SHA256 "$TMP" | awk '{print $1}')
-    if [ "$EXPECTED" != "$ACTUAL" ]; then
-        echo "Checksum mismatch!" >&2
-        exit 1
-    fi
-    echo "Checksum verified"
+# Verification is mandatory: a missing sums file or an unlisted asset must not
+# silently install an unverified binary.
+if ! curl -fsSL "$SUMS_URL" -o "$SUMS_TMP"; then
+    echo "Failed to download SHA256SUMS; refusing to install an unverified binary." >&2
+    exit 1
 fi
+EXPECTED=$(awk -v asset="$ASSET" '$2 == asset || $2 == "*" asset { print $1; exit }' "$SUMS_TMP")
+if [ -z "$EXPECTED" ]; then
+    echo "Asset $ASSET is not listed in SHA256SUMS; refusing to install an unverified binary." >&2
+    exit 1
+fi
+ACTUAL=$($SHA256 "$TMP" | awk '{print $1}')
+if [ "$EXPECTED" != "$ACTUAL" ]; then
+    echo "Checksum mismatch for $ASSET (expected $EXPECTED, got $ACTUAL)!" >&2
+    exit 1
+fi
+echo "Checksum verified"
 
 # Install
 mv "$TMP" "$INSTALL_DIR/skipbuild"

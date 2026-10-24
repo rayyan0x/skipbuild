@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Installable CMake package.** `install()` now ships every public header (`core.hpp`, `config.hpp`, `stats.hpp`, `remote.hpp`, `crypto.hpp`) and exports `skipbuild::core`, `skipbuild::skipbuild` and `skipbuild::libzstd_static`, so `find_package(skipbuild)` + `target_link_libraries(app PRIVATE skipbuild::core)` works from an installed tree instead of only in the source tree.
+- **Installer refuses unverified binaries.** Both install scripts treated a missing `SHA256SUMS` (or an asset absent from it) as "skip verification"; checksum lookup is now mandatory and fails closed, with the asset name matched exactly rather than by substring.
+- **Windows installer supports ARM64.** The asset was hardcoded to `skipbuild-windows-x64.exe`; it is now derived from the process architecture (`PROCESSOR_ARCHITEW6432`/`PROCESSOR_ARCHITECTURE`).
+
 ### Fixed
+- **CMake integration module is self-consistent.** `Findskipbuild.cmake` was installed to `share/cmake/Modules` but included `skipbuild.cmake` from `lib/cmake/skipbuild`, so module-mode `find_package` failed; both files are now installed side by side in both locations. `skipbuild_enable()` also called an undefined `_add_executable_with_skipbuild_impl` on CMake < 3.19; it now applies the launcher to existing targets and warns instead.
+- **`skipbuild-config.cmake` is a real package config.** It self-assigned `SKIPBUILD_EXECUTABLE` and never loaded the exported targets; it now uses `@PACKAGE_INIT@`, includes `skipbuildTargets.cmake`, prefers the imported launcher, and calls `check_required_components()`.
+- **CMake minimum version matches the policies used.** `cmake_policy(SET CMP0135 NEW)` requires CMake 3.24 while the project claimed 3.20; the minimum is now 3.24 and the `CMAKE_POLICY_VERSION_MINIMUM` fallback no longer forces a cache entry.
+- **Composite action uses this repository.** `action.yml` still referenced `remake` (placeholder `yourname/remake` URLs, `REMAKE_CACHE_DIR`, `~/.cache/remake`, `remake-` cache keys) and never enabled the launcher; it now installs from the checked-out `scripts/`, sets `SKIPBUILD_CACHE_DIR`/`CMAKE_*_COMPILER_LAUNCHER`, and caches `~/.cache/skipbuild`. The stale duplicate `install.sh`/`install.ps1` at the repository root were removed.
+- **Windows installer PATH check is exact.** `-notlike "*$InstallDir*"` used wildcard matching (and appended to a `$null` user PATH); entries are now compared exactly.
 - **HTTP responses are bounded.** Both clients buffered the whole body with no limit, so a broken or hostile server could exhaust the build machine's memory; bodies are now capped at 512 MiB and oversized responses fail the request. The POSIX client also reports a receive error/timeout instead of silently restoring a truncated body.
 - **Remote artifacts are checksum-verified.** `meta.json` now records a SHA-256 of each uploaded artifact and downloads whose bytes do not match are rejected (legacy entries without checksums remain readable), so truncation or corruption cannot install a bad entry.
 - **`--disable-incremental-msbuild` actually applies.** The CLI flag populated the override struct but no mask bit existed and `load_config()` never read the value, so passing it had no effect; it now overrides `disable_incremental_msbuild` like the other booleans.

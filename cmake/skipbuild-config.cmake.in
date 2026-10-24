@@ -1,12 +1,12 @@
 @PACKAGE_INIT@
 
-# skipbuild has zero external dependencies (WinCrypto / POSIX sockets, bundled
-# zstd). There is nothing to find_dependency() here.
-#
-# skipbuild.cmake locates the launcher and defines the skipbuild_enable() and
-# skipbuild_enable_target() helper functions.
+# Imported targets provided by this package:
+#   skipbuild::core              static cache library (headers in include/skipbuild)
+#   skipbuild::skipbuild         launcher executable
+#   skipbuild::libzstd_static    bundled zstd dependency
+include("${CMAKE_CURRENT_LIST_DIR}/skipbuildTargets.cmake")
+
+# Locates the launcher and defines skipbuild_enable() / skipbuild_enable_target().
 include("${CMAKE_CURRENT_LIST_DIR}/skipbuild.cmake")
 
-# Provide variables
-set(SKIPBUILD_EXECUTABLE "${SKIPBUILD_EXECUTABLE}")
-set(SKIPBUILD_VERSION "${SKIPBUILD_VERSION}")
+check_required_components(skipbuild)

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-24
+
+### Highlights
+Packaging, CI and test-integrity release: installable CMake package with exported targets, fail-closed installers, a working composite action, release gating, and tests that actually exercise the CLI and multi-process cache.
+
 ### Added
 - **Installable CMake package.** `install()` now ships every public header (`core.hpp`, `config.hpp`, `stats.hpp`, `remote.hpp`, `crypto.hpp`) and exports `skipbuild::core`, `skipbuild::skipbuild` and `skipbuild::libzstd_static`, so `find_package(skipbuild)` + `target_link_libraries(app PRIVATE skipbuild::core)` works from an installed tree instead of only in the source tree.
 - **Installer refuses unverified binaries.** Both install scripts treated a missing `SHA256SUMS` (or an asset absent from it) as "skip verification"; checksum lookup is now mandatory and fails closed, with the asset name matched exactly rather than by substring.

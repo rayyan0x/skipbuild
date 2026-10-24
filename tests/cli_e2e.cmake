@@ -37,6 +37,7 @@ function(run_launcher out_var)
         COMMAND "${CMAKE_COMMAND}" -E env
                 "SKIPBUILD_DIR=${cache}"
                 "SKIPBUILD_CACHE_DIR=${cache}"
+                "SKIPBUILD_DEBUG=1"
                 "${SKIPBUILD}" -- "${COMPILER}" ${ARGN}
         WORKING_DIRECTORY "${work}"
         OUTPUT_VARIABLE out
@@ -59,7 +60,7 @@ endif()
 
 run_launcher(second ${compile_args})
 if(NOT second MATCHES "HIT")
-    message(FATAL_ERROR "expected HIT on second compile, got:\n${second}")
+    message(FATAL_ERROR "expected HIT on second compile\nfirst:\n${first}\nsecond:\n${second}")
 endif()
 
 file(WRITE "${header}" "#define VAL 2\n")

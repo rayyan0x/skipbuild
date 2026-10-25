@@ -1,6 +1,7 @@
 #include "core.hpp"
 #include "config.hpp"
 #include "init.hpp"
+#include "args.hpp"
 #include <iostream>
 #include <fstream>
 #include <iterator>
@@ -581,70 +582,13 @@ int main(int argc, char* argv[]) {
     }
     
     // Parse CLI args for config overrides before processing commands
-    std::optional<skipbuild::CacheConfig> cli_overrides;
-    skipbuild::CliOverrideMask cli_mask;
-    fs::path cli_cache_dir;
-    bool cli_compiler_check_set = false;
-    skipbuild::CompilerCheckMode cli_compiler_check = skipbuild::CompilerCheckMode::Mtime;
-    std::vector<bool> arg_consumed(argc, false);  // Track consumed arguments
-    
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--cache-dir" && i + 1 < argc) {
-            cli_cache_dir = argv[++i];
-            arg_consumed[i] = true;
-            arg_consumed[i-1] = true;
-        } else if (arg == "--max-cache-size" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
-            cli_overrides->max_cache_size_bytes = skipbuild::ConfigParser::parse_size(argv[++i]);
-            arg_consumed[i] = true;
-            arg_consumed[i-1] = true;
-        } else if (arg == "--max-age" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
-            try { cli_overrides->max_age_days = std::stoi(argv[++i]); } catch (...) {}
-            arg_consumed[i] = true;
-            arg_consumed[i-1] = true;
-        } else if (arg == "--compression" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
-            cli_overrides->compression_enabled = skipbuild::ConfigParser::parse_bool(argv[++i]);
-            cli_mask.compression_enabled = true;
-            arg_consumed[i] = true;
-            arg_consumed[i-1] = true;
-        } else if (arg == "--read-only" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
-            cli_overrides->read_only = skipbuild::ConfigParser::parse_bool(argv[++i]);
-            cli_mask.read_only = true;
-            arg_consumed[i] = true;
-            arg_consumed[i-1] = true;
-        } else if (arg == "--remote-url" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
-            cli_overrides->remote_url = argv[++i];
-            arg_consumed[i] = true;
-            arg_consumed[i-1] = true;
-        } else if (arg == "--remote-read-only") {
-            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
-            cli_overrides->remote_read_only = true;
-            cli_mask.remote_read_only = true;
-            arg_consumed[i] = true;
-        } else if (arg == "--remote-timeout" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
-            try { cli_overrides->remote_connect_timeout_ms = std::stoi(argv[++i]); } catch (...) {}
-            cli_overrides->remote_read_timeout_ms = cli_overrides->remote_connect_timeout_ms;
-            arg_consumed[i] = true;
-            arg_consumed[i-1] = true;
-        } else if (arg == "--disable-incremental-msbuild" && i + 1 < argc) {
-            if (!cli_overrides) cli_overrides = skipbuild::CacheConfig{};
-            cli_overrides->disable_incremental_msbuild = skipbuild::ConfigParser::parse_bool(argv[++i]);
-            cli_mask.disable_incremental_msbuild = true;
-            arg_consumed[i] = true;
-            arg_consumed[i-1] = true;
-        } else if (arg == "--compiler-check" && i + 1 < argc) {
-            cli_compiler_check = skipbuild::parse_compiler_check_mode(argv[++i]);
-            cli_compiler_check_set = true;
-            arg_consumed[i] = true;
-            arg_consumed[i-1] = true;
-        }
-    }
+    auto cli = skipbuild::parse_cli_overrides(argc, argv);
+    std::optional<skipbuild::CacheConfig> cli_overrides = cli.config;
+    skipbuild::CliOverrideMask cli_mask = cli.mask;
+    fs::path cli_cache_dir = cli.cache_dir;
+    bool cli_compiler_check_set = cli.compiler_check_set;
+    skipbuild::CompilerCheckMode cli_compiler_check = cli.compiler_check;
+    std::vector<bool> arg_consumed = cli.consumed;  // Track consumed arguments
     
     // Load config with precedence. The current directory is used as the project
     // root so a project-local .skipbuild.conf is discovered (searching upward
@@ -693,12 +637,20 @@ int main(int argc, char* argv[]) {
         return 0;
     }
     if (arg1 == "--clear-stats" || arg1 == "--zero-stats") {
+        if (config.read_only) {
+            std::cerr << "skipbuild: refusing to modify statistics of a read-only cache\n";
+            return 1;
+        }
         auto cache = skipbuild::Cache(config.cache_dir, config);
         cache.clear_stats();
         std::cout << "Cache statistics cleared." << std::endl;
         return 0;
     }
     if (arg1 == "--clean") {
+        if (config.read_only) {
+            std::cerr << "skipbuild: refusing to clean a read-only cache\n";
+            return 1;
+        }
         fs::remove_all(config.cache_dir);
         std::cout << "Cache cleaned" << std::endl;
         return 0;

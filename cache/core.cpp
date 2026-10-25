@@ -1008,21 +1008,21 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key,
         try {
             std::filesystem::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
             std::error_code ec;
-            std::filesystem::remove_all(key_dir, ec);
+            if (!config_.read_only) std::filesystem::remove_all(key_dir, ec);
         } catch (...) {}
     } catch (const std::exception& e) {
         std::cerr << "[build-cache warning] Cache read failed: " << e.what() << ". Falling back to native compilation.\n";
         try {
             std::filesystem::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
             std::error_code ec;
-            std::filesystem::remove_all(key_dir, ec);
+            if (!config_.read_only) std::filesystem::remove_all(key_dir, ec);
         } catch (...) {}
     } catch (...) {
         std::cerr << "[build-cache warning] Cache read failed: unknown error. Falling back to native compilation.\n";
         try {
             std::filesystem::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
             std::error_code ec;
-            std::filesystem::remove_all(key_dir, ec);
+            if (!config_.read_only) std::filesystem::remove_all(key_dir, ec);
         } catch (...) {}
     }
     
@@ -1051,19 +1051,27 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key,
 
             fs::path key_dir = root_ / key.hash.substr(0, 2) / key.hash.substr(2, 2) / key.hash;
             std::error_code ec;
-            fs::create_directories(key_dir, ec);
-            if (ec) return std::nullopt;
 
-            // Install into the local cache under the entry's exclusive lock so
-            // concurrent readers see either no entry or the complete one.
-            FileLock file_lock(key_dir / ".lock");
-            FileLock::ScopedLock scoped_lock(file_lock, FileLock::LockType::Exclusive);
-            if (!scoped_lock) return std::nullopt;
+            // A read-only cache must not gain an entry, but remote reads must
+            // still work: restore from a private staging directory instead of
+            // installing the download under the cache root.
+            std::unique_ptr<FileLock> file_lock;
+            std::unique_ptr<FileLock::ScopedLock> scoped_lock;
+            if (!config_.read_only) {
+                fs::create_directories(key_dir, ec);
+                if (ec) return std::nullopt;
 
-            // Another process may have installed the entry while we downloaded.
-            if (fs::exists(key_dir / "meta.json")) {
-                scoped_lock.release();
-                return get(key);
+                // Install into the local cache under the entry's exclusive lock so
+                // concurrent readers see either no entry or the complete one.
+                file_lock = std::make_unique<FileLock>(key_dir / ".lock");
+                scoped_lock = std::make_unique<FileLock::ScopedLock>(*file_lock, FileLock::LockType::Exclusive);
+                if (!*scoped_lock) return std::nullopt;
+
+                // Another process may have installed the entry while we downloaded.
+                if (fs::exists(key_dir / "meta.json")) {
+                    scoped_lock->release();
+                    return get(key);
+                }
             }
 
             fs::path stage_dir = make_stage_dir(root_);
@@ -1105,19 +1113,21 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key,
                 }
 
                 // Persist the (already compressed) blob under its canonical name.
+                if (!config_.read_only) {
                 #if REMAKE_HAVE_ZSTD
-                fs::path dest = key_dir / (*safe_name + ".zst");
-                if (!write_file(dest, artifact.data)) {
-                    drop_stage();
-                    return std::nullopt;
-                }
+                    fs::path dest = key_dir / (*safe_name + ".zst");
+                    if (!write_file(dest, artifact.data)) {
+                        drop_stage();
+                        return std::nullopt;
+                    }
                 #else
-                fs::path dest = key_dir / *safe_name;
-                if (!write_file(dest, decompressed)) {
-                    drop_stage();
-                    return std::nullopt;
-                }
+                    fs::path dest = key_dir / *safe_name;
+                    if (!write_file(dest, decompressed)) {
+                        drop_stage();
+                        return std::nullopt;
+                    }
                 #endif
+                }
 
                 entry.size_bytes += static_cast<int64_t>(decompressed.size());
                 staged_files.push_back(staged);
@@ -1145,16 +1155,18 @@ std::optional<CacheEntry> Cache::safe_get(const CacheKey& key,
 
             // Write meta.json atomically so later lookups hit the local cache
             // and collectors/pruners see a complete entry.
-            fs::path meta_file = key_dir / "meta.json";
-            fs::path meta_temp = make_temp_path(key_dir, "meta.json");
+            if (!config_.read_only) {
+                fs::path meta_file = key_dir / "meta.json";
+                fs::path meta_temp = make_temp_path(key_dir, "meta.json");
 #if REMAKE_HAVE_ZSTD
-            const bool stored_compressed = true;  // remote artifacts are zstd-compressed
+                const bool stored_compressed = true;  // remote artifacts are zstd-compressed
 #else
-            const bool stored_compressed = false;
+                const bool stored_compressed = false;
 #endif
-            if (!write_meta_json(meta_file, meta_temp, key.toolchain_id, entry.size_bytes, stored_compressed, stored_sidecars)) {
-                drop_stage();
-                return std::nullopt;
+                if (!write_meta_json(meta_file, meta_temp, key.toolchain_id, entry.size_bytes, stored_compressed, stored_sidecars)) {
+                    drop_stage();
+                    return std::nullopt;
+                }
             }
 
             entry.transient_files = std::move(staged_files);
@@ -1213,6 +1225,10 @@ bool Cache::safe_put(const CacheKey& key, const std::vector<std::filesystem::pat
             for (const auto& [path, type] : sidecars) {
                 (void)type;
                 if (!fs::exists(path)) continue;
+                // Empty placeholder sidecars carry no information; do not
+                // advertise them to the remote cache.
+                std::error_code size_ec;
+                if (fs::file_size(path, size_ec) == 0) continue;
                 std::vector<uint8_t> file_data;
                 if (!read_file(path, file_data)) continue;
 
@@ -1306,7 +1322,7 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                     FileLock file_lock_excl(lock_file);
                     FileLock::ScopedLock excl_lock(file_lock_excl, FileLock::LockType::Exclusive);
                     if (excl_lock) {
-                        std::filesystem::remove_all(key_dir, ec);
+                        if (!config_.read_only) std::filesystem::remove_all(key_dir, ec);
                     }
                 } else {
                     CacheEntry entry;
@@ -1416,7 +1432,7 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
                         FileLock file_lock_excl(lock_file);
                         FileLock::ScopedLock excl_lock(file_lock_excl, FileLock::LockType::Exclusive);
                         if (excl_lock) {
-                            std::filesystem::remove_all(key_dir, ec);
+                            if (!config_.read_only) std::filesystem::remove_all(key_dir, ec);
                         }
                     } else {
                         if (!stage_dir.empty()) {
@@ -1434,17 +1450,23 @@ std::optional<CacheEntry> Cache::get(const CacheKey& key) const {
         }
     }
     
-    // Record stats OUTSIDE the cache mutex
-    if (hit) {
-        stats_tracker_->record_hit(1000, entry_size); // 1000ms estimated compile time saved
-    } else {
-        stats_tracker_->record_miss();
+    // Record stats OUTSIDE the cache mutex. Statistics live inside the cache
+    // root, so a read-only cache must not update them either.
+    if (!config_.read_only) {
+        if (hit) {
+            stats_tracker_->record_hit(1000, entry_size); // 1000ms estimated compile time saved
+        } else {
+            stats_tracker_->record_miss();
+        }
     }
     
     return result;
 }
 
 void Cache::update_access_time(const std::string& hash) const {
+    // LRU bookkeeping is a write; read-only caches keep their existing mtimes.
+    if (config_.read_only) return;
+
     std::filesystem::path key_dir = root_ / hash.substr(0, 2) / hash.substr(2, 2) / hash;
     std::filesystem::path lock_file = key_dir / ".lock";
     
@@ -1563,6 +1585,9 @@ std::vector<Cache::EntryMeta> Cache::collect_entries() const {
 }
 
 void Cache::purge_corrupted_entry(const EntryMeta& entry) const {
+    // A read-only cache may be read but never modified, including repairs.
+    if (config_.read_only) return;
+
     std::filesystem::path lock_file = entry.path / ".lock";
     FileLock file_lock(lock_file);
     FileLock::ScopedLock scoped_lock(file_lock, FileLock::LockType::Exclusive);
@@ -1574,6 +1599,9 @@ void Cache::purge_corrupted_entry(const EntryMeta& entry) const {
 
 void Cache::prune(int64_t max_size_bytes, int max_age_days) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+    // Eviction mutates the cache, so a read-only cache is never pruned.
+    if (config_.read_only) return;
     
     // Use config defaults if not explicitly provided
     if (max_size_bytes < 0) max_size_bytes = config_.max_cache_size_bytes;

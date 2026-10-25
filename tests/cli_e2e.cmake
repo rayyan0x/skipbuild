@@ -79,4 +79,43 @@ if(third MATCHES "HIT")
     message(FATAL_ERROR "header edit did not invalidate the cache, got:\n${third}")
 endif()
 
+# A read-only cache must refuse destructive commands and keep its entries.
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+            "SKIPBUILD_DIR=${cache}"
+            "SKIPBUILD_CACHE_DIR=${cache}"
+            "${SKIPBUILD}" --read-only true --clean
+    WORKING_DIRECTORY "${work}"
+    OUTPUT_VARIABLE ro_out
+    ERROR_VARIABLE ro_err
+    RESULT_VARIABLE ro_rc
+)
+if(ro_rc EQUAL 0)
+    message(FATAL_ERROR "read-only --clean unexpectedly succeeded\nstdout:\n${ro_out}\nstderr:\n${ro_err}")
+endif()
+if(NOT ro_err MATCHES "read-only")
+    message(FATAL_ERROR "read-only --clean did not explain the refusal\nstderr:\n${ro_err}")
+endif()
+if(NOT EXISTS "${cache}")
+    message(FATAL_ERROR "read-only --clean removed the cache directory")
+endif()
+
+# The same command is allowed once the cache is writable again.
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+            "SKIPBUILD_DIR=${cache}"
+            "SKIPBUILD_CACHE_DIR=${cache}"
+            "${SKIPBUILD}" --clean
+    WORKING_DIRECTORY "${work}"
+    OUTPUT_VARIABLE clean_out
+    ERROR_VARIABLE clean_err
+    RESULT_VARIABLE clean_rc
+)
+if(NOT clean_rc EQUAL 0)
+    message(FATAL_ERROR "writable --clean failed with ${clean_rc}\nstdout:\n${clean_out}\nstderr:\n${clean_err}")
+endif()
+if(EXISTS "${cache}")
+    message(FATAL_ERROR "--clean did not remove the cache directory")
+endif()
+
 message(STATUS "cli e2e test passed")

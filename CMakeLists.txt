@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(skipbuild LANGUAGES CXX VERSION 0.6.1)
+project(skipbuild LANGUAGES CXX VERSION 0.6.2)
 
 include(GNUInstallDirs)
 
@@ -113,6 +113,12 @@ target_include_directories(test_init PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cli)
 skipbuild_sanitize(test_init)
 skipbuild_enable_asserts(test_init)
 
+add_executable(test_cli_args tests/test_cli_args.cpp)
+target_link_libraries(test_cli_args remake_core)
+target_include_directories(test_cli_args PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cli)
+skipbuild_sanitize(test_cli_args)
+skipbuild_enable_asserts(test_cli_args)
+
 foreach(tgt remake_core skipbuild)
     skipbuild_werror(${tgt})
     skipbuild_sanitize(${tgt})
@@ -130,6 +136,7 @@ add_test(NAME stats_test COMMAND test_stats)
 add_test(NAME pch_test COMMAND test_pch)
 add_test(NAME response_file_test COMMAND test_response_file)
 add_test(NAME init_test COMMAND test_init)
+add_test(NAME cli_args_test COMMAND test_cli_args)
 add_test(NAME key_soundness_test COMMAND test_key_soundness)
 add_test(NAME auto_clear_test COMMAND test_auto_clear)
 

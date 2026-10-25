@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-25
+
+### Fixed
+- **`--` is a hard boundary for launcher options.** Arguments after `--` are passed to the wrapped compiler verbatim; previously `skipbuild -- g++ --cache-dir X` silently removed `--cache-dir X` from the compiler command line.
+- **Read-only caches are never modified.** `--clean`, `--clear-stats`, `prune()`, access-time updates, corrupted-entry repairs and remote-hit installs now respect `read_only`. A remote hit is restored from a private staging directory instead of being written into the cache, so remote reads still work.
+- **Remote uploads skip zero-byte sidecars** instead of advertising empty files.
+
 ## [0.6.1] - 2026-10-24
 
 ### Highlights

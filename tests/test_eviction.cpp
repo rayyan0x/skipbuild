@@ -197,6 +197,26 @@ int main() {
     assert(!entry5.has_value() && "Corrupted meta.json should be purged on get!");
     std::cout << "Corrupted meta.json correctly purged!\n";
     
+    // A read-only cache may be read but never pruned or evicted.
+    std::cout << "\nTesting read-only prune...\n";
+    fs::path src6 = work_dir / "test6.cpp";
+    std::ofstream(src6) << "int main() { return 6; }";
+    auto key6 = skipbuild::Cache::compute_key(src6, includes, flags, compiler);
+    fs::path obj6 = work_dir / "test6.o";
+    std::ofstream(obj6) << data;
+    assert(cache.put(key6, {obj6}) && "setup: failed to store entry for read-only test");
+
+    skipbuild::CacheConfig ro_config;
+    ro_config.cache_dir = cache_dir;
+    ro_config.read_only = true;
+    ro_config.max_cache_size_bytes = 1;
+    ro_config.max_age_days = 0;
+    skipbuild::Cache ro_cache(cache_dir, ro_config);
+    ro_cache.prune(1, 0);
+    assert(!ro_cache.put(key6, {obj6}) && "read-only cache accepted a write");
+    assert(cache.get(key6).has_value() && "read-only prune removed an entry");
+    std::cout << "Read-only cache correctly skipped pruning.\n";
+
     // Cleanup
     fs::remove_all(work_dir);
     fs::remove_all(cache_dir);

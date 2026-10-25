@@ -208,10 +208,12 @@ public:
     }
     
     void record_direct_execute() const {
+        if (config_.read_only) return;
         stats_tracker_->record_direct_execute();
     }
     
     void clear_stats() const {
+        if (config_.read_only) return;
         stats_tracker_->clear();
     }
     

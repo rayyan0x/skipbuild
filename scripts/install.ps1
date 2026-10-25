@@ -25,7 +25,7 @@
     irm https://raw.githubusercontent.com/rayyan0x/skipbuild/main/scripts/install.ps1 -OutFile install.ps1; .\install.ps1
 
 .EXAMPLE
-    .\install.ps1 -Version 0.6.1
+    .\install.ps1 -Version 0.6.2
 
 .PARAMETER Version
     Version tag to install (default: latest)

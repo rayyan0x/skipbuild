@@ -32,7 +32,7 @@ Both installers download the prebuilt binary from GitHub Releases, **verify its 
 ### Confirm
 
 ```powershell
-skipbuild --version      # -> skipbuild 0.6.1
+skipbuild --version      # -> skipbuild 0.6.2
 ```
 
 > **Terminal already open?** Operating systems apply `PATH` changes only to processes started *afterwards*. If `skipbuild` isn't found:
@@ -619,6 +619,6 @@ $env:REMAKE_LOG = "debug"
 ```bash
 ctest --test-dir build -C Release --output-on-failure --timeout 120
 ```
-All 12 tests pass on Windows, Linux, macOS (CI verified).
+All 16 tests pass on Windows, Linux, macOS (CI verified).
 
 **License:** MIT — see [LICENSE](LICENSE)
